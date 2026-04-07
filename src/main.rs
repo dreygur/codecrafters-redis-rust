@@ -346,6 +346,88 @@ async fn handle_connection(
                         }
                     }
 
+                    "TYPE" => {
+                        if args.len() < 2 {
+                            RespEncoder::error("wrong number of arguments for 'type' command")
+                        } else {
+                            RespEncoder::simple_string(store.get_type(&args[1]).unwrap_or_else(|| "none".to_string()).as_str())
+                        }
+                    }
+
+                    "XADD" => {
+                        if args.len() < 4 {
+                            RespEncoder::error("wrong number of arguments for 'xadd' command")
+                        } else {
+                            let key = &args[1];
+                            let id = &args[2];
+                            let fields: Vec<(String, String)> = args[3..].chunks(2)
+                                .filter(|chunk| chunk.len() == 2)
+                                .map(|chunk| (chunk[0].clone(), chunk[1].clone()))
+                                .collect();
+                            match store.xadd(key, id, fields) {
+                                Some(id) => RespEncoder::bulk_string(&id),
+                                None => RespEncoder::error("invalid ID"),
+                            }
+                        }
+                    }
+
+                    "XRANGE" => {
+                        if args.len() < 4 {
+                            RespEncoder::error("wrong number of arguments for 'xrange' command")
+                        } else {
+                            let start = &args[2];
+                            let end = &args[3];
+                            let count = args.get(5).and_then(|c| c.parse().ok());
+                            let entries = store.xrange(&args[1], start, end, count);
+                            let mut response = vec![];
+                            for (id, fields) in entries {
+                                let mut field_arr = vec![RespEncoder::bulk_string(&id)];
+                                for (k, v) in fields {
+                                    field_arr.push(RespEncoder::bulk_string(&k));
+                                    field_arr.push(RespEncoder::bulk_string(&v));
+                                }
+                                response.push(RespEncoder::array(field_arr));
+                            }
+                            RespEncoder::array(response)
+                        }
+                    }
+
+                    "XREAD" => {
+                        if args.len() < 5 || args[1] != "STREAMS" {
+                            RespEncoder::error("wrong number of arguments for 'xread' command")
+                        } else {
+                            let mut i = 2;
+                            let mut keys = vec![];
+                            let mut ids = vec![];
+                            while i < args.len() - 1 {
+                                keys.push(args[i].clone());
+                                ids.push(args[i + 1].clone());
+                                i += 2;
+                            }
+                            let results = store.xread(&keys, &ids);
+                            let mut response = vec![];
+                            for (key, entries) in results {
+                                let mut key_arr = vec![RespEncoder::bulk_string(&key)];
+                                let mut entries_arr = vec![];
+                                for (id, fields) in entries {
+                                    let mut entry_arr = vec![RespEncoder::bulk_string(&id)];
+                                    for (k, v) in fields {
+                                        entry_arr.push(RespEncoder::bulk_string(&k));
+                                        entry_arr.push(RespEncoder::bulk_string(&v));
+                                    }
+                                    entries_arr.push(RespEncoder::array(entry_arr));
+                                }
+                                key_arr.push(RespEncoder::array(entries_arr));
+                                response.push(RespEncoder::array(key_arr));
+                            }
+                            if response.is_empty() {
+                                RespEncoder::null_array()
+                            } else {
+                                RespEncoder::array(response)
+                            }
+                        }
+                    }
+
                     "ZADD" => {
                         if args.len() < 4 || (args.len() - 2) % 2 != 0 {
                             RespEncoder::error("wrong number of arguments for 'zadd' command")

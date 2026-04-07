@@ -11,6 +11,7 @@ pub struct InMemoryStore {
     strings: Arc<Mutex<HashMap<String, Entry>>>,
     zsets: Arc<Mutex<HashMap<String, SortedSet>>>,
     lists: Arc<Mutex<HashMap<String, Vec<String>>>>,
+    streams: Arc<Mutex<HashMap<String, Vec<(String, Vec<(String, String)>)>>>>,
     key_versions: Arc<Mutex<HashMap<String, u64>>>,
 }
 
@@ -20,6 +21,7 @@ impl InMemoryStore {
             strings: Arc::new(Mutex::new(HashMap::new())),
             zsets: Arc::new(Mutex::new(HashMap::new())),
             lists: Arc::new(Mutex::new(HashMap::new())),
+            streams: Arc::new(Mutex::new(HashMap::new())),
             key_versions: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -94,7 +96,7 @@ impl StorePort for InMemoryStore {
         let count = {
             let mut map = self.lists.lock().unwrap();
             let list = map.entry(key.to_string()).or_insert_with(Vec::new);
-            for v in values.into_iter().rev() {
+            for v in values {
                 list.insert(0, v);
             }
             list.len() as i64
@@ -168,6 +170,119 @@ impl StorePort for InMemoryStore {
             .get(key)
             .map(|l| l.len() as i64)
             .unwrap_or(0)
+    }
+
+    fn get_type(&self, key: &str) -> Option<String> {
+        let map = self.strings.lock().unwrap();
+        if map.contains_key(key) {
+            return Some("string".to_string());
+        }
+        drop(map);
+        let map = self.zsets.lock().unwrap();
+        if map.contains_key(key) {
+            return Some("zset".to_string());
+        }
+        drop(map);
+        let map = self.lists.lock().unwrap();
+        if map.contains_key(key) {
+            return Some("list".to_string());
+        }
+        drop(map);
+        let map = self.streams.lock().unwrap();
+        if map.contains_key(key) {
+            return Some("stream".to_string());
+        }
+        None
+    }
+
+    fn xadd(&self, key: &str, id: &str, fields: Vec<(String, String)>) -> Option<String> {
+        if id.is_empty() || id.contains('*') {
+            return None;
+        }
+        let parts: Vec<&str> = id.split('-').collect();
+        if parts.len() != 2 {
+            return None;
+        }
+        let timestamp: u64 = parts[0].parse().ok()?;
+        let seq: u64 = parts[1].parse().ok()?;
+        if timestamp == 0 && seq == 0 {
+            return None;
+        }
+
+        let final_id = format!("{}-{}", timestamp, seq);
+        let mut map = self.streams.lock().unwrap();
+        let stream = map.entry(key.to_string()).or_insert_with(Vec::new);
+
+        if let Some(pos) = stream
+            .iter()
+            .position(|(existing_id, _)| existing_id > &final_id)
+        {
+            stream.insert(pos, (final_id.clone(), fields));
+        } else {
+            stream.push((final_id.clone(), fields));
+        }
+
+        self.bump_version(key);
+        Some(final_id)
+    }
+
+    fn xrange(
+        &self,
+        key: &str,
+        start: &str,
+        end: &str,
+        count: Option<usize>,
+    ) -> Vec<(String, Vec<(String, String)>)> {
+        let map = self.streams.lock().unwrap();
+        let stream = match map.get(key) {
+            Some(s) => s,
+            None => return vec![],
+        };
+
+        let start_id = if start == "-" {
+            "".to_string()
+        } else {
+            start.to_string()
+        };
+        let end_id = if end == "+" {
+            std::char::MAX.to_string()
+        } else {
+            end.to_string()
+        };
+
+        stream
+            .iter()
+            .filter(|(id, _)| id >= &start_id && id <= &end_id)
+            .take(count.unwrap_or(usize::MAX))
+            .map(|(id, fields)| (id.clone(), fields.clone()))
+            .collect()
+    }
+
+    fn xread(
+        &self,
+        keys: &[String],
+        ids: &[String],
+    ) -> Vec<(String, Vec<(String, Vec<(String, String)>)>)> {
+        let map = self.streams.lock().unwrap();
+        let mut results = vec![];
+
+        for (key, start_id) in keys.iter().zip(ids.iter()) {
+            let stream = match map.get(key) {
+                Some(s) => s,
+                None => continue,
+            };
+
+            let entries: Vec<(String, Vec<(String, String)>)> = stream
+                .iter()
+                .filter(|(id, _)| id > start_id)
+                .map(|(id, fields)| (id.clone(), fields.clone()))
+                .collect();
+
+            if !entries.is_empty() {
+                results.push((key.clone(), entries));
+            }
+        }
+        results
     }
 
     fn zadd(&self, key: &str, pairs: Vec<(f64, String)>) -> i64 {
@@ -287,6 +402,7 @@ impl Clone for InMemoryStore {
             strings: self.strings.clone(),
             zsets: self.zsets.clone(),
             lists: self.lists.clone(),
+            streams: self.streams.clone(),
             key_versions: self.key_versions.clone(),
         }
     }
