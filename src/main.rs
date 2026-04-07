@@ -13,6 +13,7 @@ fn main() {
     for stream in listener.incoming() {
         match stream {
             Ok(mut _stream) => {
+                println!("accepted new connection");
                 let _ = handle(&mut _stream);
             }
             Err(e) => {
@@ -24,8 +25,8 @@ fn main() {
 
 fn handle(stream: &mut TcpStream) -> Result<()> {
     // stream.write(b"+PONG\r\n")?;
+    let mut buffer = [0; 512];
     loop {
-        let mut buffer = [0; 512];
         match stream.read(&mut buffer) {
             Ok(0) => {
                 println!("connection closed");
