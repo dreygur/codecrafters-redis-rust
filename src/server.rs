@@ -7,6 +7,7 @@ use tokio::{
 
 use crate::{
     command::{dispatch, subscribe_response},
+    pubsub::PubSubService,
     resp,
     session::Session,
     store::StoreService,
@@ -14,7 +15,7 @@ use crate::{
 
 const BUF_SIZE: usize = 512;
 
-pub async fn handle(mut stream: TcpStream, store: StoreService) -> Result<()> {
+pub async fn handle(mut stream: TcpStream, store: StoreService, pubsub: PubSubService) -> Result<()> {
     let mut buf = [0u8; BUF_SIZE];
     let mut session = Session::new();
 
@@ -52,9 +53,14 @@ pub async fn handle(mut stream: TcpStream, store: StoreService) -> Result<()> {
 
                 let response = match cmd.as_str() {
                     "SUBSCRIBE" => args.iter().skip(1).fold(BytesMut::new(), |mut out, channel| {
+                        pubsub.subscribe(channel);
                         out.extend_from_slice(&subscribe_response(channel, session.subscribe(channel)));
                         out
                     }).freeze(),
+                    "PUBLISH" => {
+                        let count = args.get(1).map_or(0, |ch| pubsub.subscriber_count(ch));
+                        resp::integer(count)
+                    }
                     "MULTI" => {
                         if session.begin_tx() {
                             Bytes::from_static(b"+OK\r\n")
