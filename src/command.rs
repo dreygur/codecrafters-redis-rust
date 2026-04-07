@@ -1,6 +1,6 @@
 use bytes::Bytes;
 
-use crate::{resp, store::StoreService};
+use crate::{geo, resp, store::StoreService};
 
 pub fn dispatch(args: &[String], store: &StoreService) -> Bytes {
     match args[0].to_uppercase().as_str() {
@@ -16,6 +16,10 @@ pub fn dispatch(args: &[String], store: &StoreService) -> Bytes {
         "ZCARD" => zcard(args, store),
         "ZSCORE" => zscore(args, store),
         "ZREM" => zrem(args, store),
+        "GEOADD" => geoadd(args, store),
+        "GEOPOS" => geopos(args, store),
+        "GEODIST" => geodist(args, store),
+        "GEOSEARCH" => geosearch(args, store),
         _ => resp::error("unknown command"),
     }
 }
@@ -139,6 +143,119 @@ fn zrem(args: &[String], store: &StoreService) -> Bytes {
         return resp::error("wrong number of arguments");
     }
     resp::integer(store.zrem(&args[1], &args[2..].to_vec()))
+}
+
+// ---------------------------------------------------------------------------
+// Geo commands
+// ---------------------------------------------------------------------------
+
+fn geoadd(args: &[String], store: &StoreService) -> Bytes {
+    // GEOADD key longitude latitude member [longitude latitude member ...]
+    if args.len() < 5 || (args.len() - 2) % 3 != 0 {
+        return resp::error("wrong number of arguments");
+    }
+    let key = &args[1];
+    let mut added = 0i64;
+    for chunk in args[2..].chunks(3) {
+        let (Ok(lon), Ok(lat)) = (chunk[0].parse::<f64>(), chunk[1].parse::<f64>()) else {
+            return resp::error("value is not a valid float");
+        };
+        if !geo::validate(lon, lat) {
+            return resp::error("invalid longitude,latitude pair");
+        }
+        if store.geoadd(key, lon, lat, chunk[2].clone()) {
+            added += 1;
+        }
+    }
+    resp::integer(added)
+}
+
+fn geopos(args: &[String], store: &StoreService) -> Bytes {
+    // GEOPOS key member [member ...]
+    if args.len() < 3 {
+        return resp::error("wrong number of arguments");
+    }
+    let key = &args[1];
+    let items = args[2..]
+        .iter()
+        .map(|member| match store.geopos(key, member) {
+            Some((lon, lat)) => resp::array(vec![
+                resp::bulk_string(&format!("{lon}")),
+                resp::bulk_string(&format!("{lat}")),
+            ]),
+            None => resp::null_bulk(),
+        })
+        .collect();
+    resp::array(items)
+}
+
+fn geodist(args: &[String], store: &StoreService) -> Bytes {
+    // GEODIST key member1 member2 [m|km|mi|ft]
+    if args.len() < 4 {
+        return resp::error("wrong number of arguments");
+    }
+    let unit = args.get(4).map(String::as_str).unwrap_or("m");
+    match store.geodist(&args[1], &args[2], &args[3]) {
+        Some(dist_m) => resp::bulk_string(&format!("{:.4}", geo::from_metres(dist_m, unit))),
+        None => resp::null_bulk(),
+    }
+}
+
+fn geosearch(args: &[String], store: &StoreService) -> Bytes {
+    // GEOSEARCH key FROMLONLAT lon lat BYRADIUS radius unit [ASC|DESC]
+    // GEOSEARCH key FROMMEMBER member  BYRADIUS radius unit [ASC|DESC]
+    if args.len() < 7 {
+        return resp::error("wrong number of arguments");
+    }
+    let key = &args[1];
+    let mut i = 2;
+
+    // --- centre ---
+    let (center_lon, center_lat) = match args[i].to_uppercase().as_str() {
+        "FROMLONLAT" => {
+            let (Ok(lon), Ok(lat)) = (args[i + 1].parse::<f64>(), args[i + 2].parse::<f64>())
+            else {
+                return resp::error("value is not a valid float");
+            };
+            i += 3;
+            (lon, lat)
+        }
+        "FROMMEMBER" => {
+            let Some(pos) = store.geopos(key, &args[i + 1]) else {
+                return resp::error("could not find the requested member");
+            };
+            i += 2;
+            pos
+        }
+        _ => return resp::error("syntax error"),
+    };
+
+    // --- search shape ---
+    if args.get(i).map(String::as_str) != Some("BYRADIUS")
+        && args.get(i).map(|s| s.to_uppercase()).as_deref() != Some("BYRADIUS")
+    {
+        return resp::error("syntax error");
+    }
+    let (Ok(radius), unit) = (args[i + 1].parse::<f64>(), args[i + 2].as_str()) else {
+        return resp::error("value is not a valid float");
+    };
+    let radius_m = geo::to_metres(radius, unit);
+    i += 3;
+
+    // --- optional sort ---
+    let descending = args
+        .get(i)
+        .map(|s| s.to_uppercase() == "DESC")
+        .unwrap_or(false);
+
+    let mut hits = store.geosearch_radius(key, center_lon, center_lat, radius_m);
+    if descending {
+        hits.sort_by(|a, b| b.1.total_cmp(&a.1));
+    } else {
+        hits.sort_by(|a, b| a.1.total_cmp(&b.1));
+    }
+
+    resp::array(hits.into_iter().map(|(m, _)| resp::bulk_string(&m)).collect())
 }
 
 pub fn unsubscribe_response(channel: &str, count: i64) -> Bytes {

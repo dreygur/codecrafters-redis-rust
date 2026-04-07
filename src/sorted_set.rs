@@ -51,6 +51,14 @@ impl SortedSet {
             .collect()
     }
 
+    /// Returns all members with their scores, sorted by (score, member).
+    pub fn all(&self) -> Vec<(String, f64)> {
+        self.sorted()
+            .into_iter()
+            .map(|(m, s)| (m.to_string(), s))
+            .collect()
+    }
+
     /// Removes a member. Returns `true` if it existed.
     pub fn remove(&mut self, member: &str) -> bool {
         self.members.remove(member).is_some()

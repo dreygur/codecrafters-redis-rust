@@ -1,5 +1,6 @@
 mod command;
 mod error;
+mod geo;
 mod pubsub;
 mod resp;
 mod server;

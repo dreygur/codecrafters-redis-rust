@@ -4,7 +4,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::{error::RedisError, sorted_set::SortedSet};
+use crate::{error::RedisError, geo, sorted_set::SortedSet};
 
 pub struct Entry {
     pub value: String,
@@ -122,6 +122,53 @@ impl StoreService {
     /// Returns the score of a member, or `None` if not found.
     pub fn zscore(&self, key: &str, member: &str) -> Option<f64> {
         self.zsets.lock().unwrap().get(key)?.score(member)
+    }
+
+    // -- geo operations (backed by zsets; score = 52-bit geohash as f64) --
+
+    /// Adds a member. Returns `true` if the member is new.
+    pub fn geoadd(&self, key: &str, lon: f64, lat: f64, member: String) -> bool {
+        let score = geo::encode(lon, lat);
+        let mut map = self.zsets.lock().unwrap();
+        map.entry(key.to_string())
+            .or_insert_with(SortedSet::new)
+            .add(score, member)
+    }
+
+    /// Returns decoded (lon, lat) for a member, or `None` if not found.
+    pub fn geopos(&self, key: &str, member: &str) -> Option<(f64, f64)> {
+        let score = self.zsets.lock().unwrap().get(key)?.score(member)?;
+        Some(geo::decode(score))
+    }
+
+    /// Returns the distance in metres between two members, or `None` if either is missing.
+    pub fn geodist(&self, key: &str, m1: &str, m2: &str) -> Option<f64> {
+        let (lon1, lat1) = self.geopos(key, m1)?;
+        let (lon2, lat2) = self.geopos(key, m2)?;
+        Some(geo::distance_m(lon1, lat1, lon2, lat2))
+    }
+
+    /// Returns all members within `radius_m` of `(center_lon, center_lat)`,
+    /// as `(member, distance_m)` pairs.
+    pub fn geosearch_radius(
+        &self,
+        key: &str,
+        center_lon: f64,
+        center_lat: f64,
+        radius_m: f64,
+    ) -> Vec<(String, f64)> {
+        let map = self.zsets.lock().unwrap();
+        let Some(zset) = map.get(key) else {
+            return vec![];
+        };
+        zset.all()
+            .into_iter()
+            .filter_map(|(member, score)| {
+                let (lon, lat) = geo::decode(score);
+                let dist = geo::distance_m(center_lon, center_lat, lon, lat);
+                (dist <= radius_m).then_some((member, dist))
+            })
+            .collect()
     }
 
     /// Removes members. Returns the number that were actually removed.
