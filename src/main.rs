@@ -30,6 +30,11 @@ impl Entry {
 
 type Store = Arc<Mutex<HashMap<String, Entry>>>;
 
+enum TxState {
+    Inactive,
+    Active(Vec<Vec<String>>),
+}
+
 fn main() {
     let listener = TcpListener::bind(ADDR).unwrap();
     let store: Store = Arc::new(Mutex::new(HashMap::new()));
@@ -73,7 +78,6 @@ fn cmd_set(args: &[String], store: &Store) -> Vec<u8> {
     let key = args[1].clone();
     let value = args[2].clone();
 
-    // Parse optional PX/EX flags
     let px: Option<u64> = match args.get(3).map(|s| s.to_uppercase()).as_deref() {
         Some("PX") => args.get(4).and_then(|v| v.parse().ok()),
         Some("EX") => args
@@ -143,6 +147,7 @@ fn dispatch(args: &[String], store: &Store) -> Vec<u8> {
 
 fn handle(mut stream: TcpStream, store: Store) -> Result<()> {
     let mut buf = [0; BUF_SIZE];
+    let mut tx = TxState::Inactive;
 
     loop {
         match stream.read(&mut buf)? {
@@ -151,9 +156,54 @@ fn handle(mut stream: TcpStream, store: Store) -> Result<()> {
                 break;
             }
             n => {
-                if let Some(args) = parse_resp(&buf[..n]) {
-                    stream.write_all(&dispatch(&args, &store))?;
-                }
+                let Some(args) = parse_resp(&buf[..n]) else {
+                    continue;
+                };
+
+                let response = match args[0].to_uppercase().as_str() {
+                    "MULTI" => match tx {
+                        TxState::Active(_) => b"-ERR MULTI calls can not be nested\r\n".to_vec(),
+                        TxState::Inactive => {
+                            tx = TxState::Active(Vec::new());
+                            b"+OK\r\n".to_vec()
+                        }
+                    },
+                    "EXEC" => {
+                        match tx {
+                            TxState::Inactive => b"-ERR EXEC without MULTI\r\n".to_vec(),
+                            TxState::Active(ref queue) => {
+                                // Execute all queued commands and collect responses
+                                let results: Vec<Vec<u8>> =
+                                    queue.iter().map(|cmd| dispatch(cmd, &store)).collect();
+
+                                // Encode as RESP array
+                                let mut resp = format!("*{}\r\n", results.len()).into_bytes();
+                                for r in results {
+                                    resp.extend(r);
+                                }
+
+                                tx = TxState::Inactive;
+                                resp
+                            }
+                        }
+                    }
+                    "DISCARD" => match tx {
+                        TxState::Inactive => b"-ERR DISCARD without MULTI\r\n".to_vec(),
+                        TxState::Active(_) => {
+                            tx = TxState::Inactive;
+                            b"+OK\r\n".to_vec()
+                        }
+                    },
+                    _ => match tx {
+                        TxState::Active(ref mut queue) => {
+                            queue.push(args);
+                            b"+QUEUED\r\n".to_vec()
+                        }
+                        TxState::Inactive => dispatch(&args, &store),
+                    },
+                };
+
+                stream.write_all(&response)?;
             }
         }
     }
