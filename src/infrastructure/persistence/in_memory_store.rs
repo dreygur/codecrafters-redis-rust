@@ -1,16 +1,50 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     sync::{Arc, Mutex},
 };
+
+use tokio::sync::oneshot;
 
 use crate::application::ports::StorePort;
 use crate::domain::entities::{Entry, SortedSet};
 use crate::domain::DomainError;
 
+struct ListsState {
+    data: HashMap<String, Vec<String>>,
+    waiters: HashMap<String, VecDeque<oneshot::Sender<String>>>,
+}
+
+impl ListsState {
+    fn new() -> Self {
+        Self {
+            data: HashMap::new(),
+            waiters: HashMap::new(),
+        }
+    }
+
+    /// After data is pushed to key, wake as many BLPOP waiters as there are elements.
+    fn notify_waiters(&mut self, key: &str) {
+        loop {
+            let has_waiter = self.waiters.get(key).map(|w| !w.is_empty()).unwrap_or(false);
+            let has_data = self.data.get(key).map(|l| !l.is_empty()).unwrap_or(false);
+            if !has_waiter || !has_data {
+                break;
+            }
+            let sender = self.waiters.get_mut(key).unwrap().pop_front().unwrap();
+            let val = self.data.get_mut(key).unwrap().remove(0);
+            if sender.send(val).is_err() {
+                // Receiver was dropped (client disconnected), try next waiter.
+                continue;
+            }
+            break;
+        }
+    }
+}
+
 pub struct InMemoryStore {
     strings: Arc<Mutex<HashMap<String, Entry>>>,
     zsets: Arc<Mutex<HashMap<String, SortedSet>>>,
-    lists: Arc<Mutex<HashMap<String, Vec<String>>>>,
+    lists: Arc<Mutex<ListsState>>,
     streams: Arc<Mutex<HashMap<String, Vec<(String, Vec<(String, String)>)>>>>,
     key_versions: Arc<Mutex<HashMap<String, u64>>>,
 }
@@ -20,7 +54,7 @@ impl InMemoryStore {
         Self {
             strings: Arc::new(Mutex::new(HashMap::new())),
             zsets: Arc::new(Mutex::new(HashMap::new())),
-            lists: Arc::new(Mutex::new(HashMap::new())),
+            lists: Arc::new(Mutex::new(ListsState::new())),
             streams: Arc::new(Mutex::new(HashMap::new())),
             key_versions: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -81,12 +115,12 @@ impl StorePort for InMemoryStore {
 
     fn rpush(&self, key: &str, values: Vec<String>) -> i64 {
         let count = {
-            let mut map = self.lists.lock().unwrap();
-            let list = map.entry(key.to_string()).or_insert_with(Vec::new);
-            for v in values {
-                list.push(v);
-            }
-            list.len() as i64
+            let mut state = self.lists.lock().unwrap();
+            let list = state.data.entry(key.to_string()).or_default();
+            list.extend(values);
+            let len = list.len() as i64;
+            state.notify_waiters(key);
+            len
         };
         self.bump_version(key);
         count
@@ -94,27 +128,29 @@ impl StorePort for InMemoryStore {
 
     fn lpush(&self, key: &str, values: Vec<String>) -> i64 {
         let count = {
-            let mut map = self.lists.lock().unwrap();
-            let list = map.entry(key.to_string()).or_insert_with(Vec::new);
+            let mut state = self.lists.lock().unwrap();
+            let list = state.data.entry(key.to_string()).or_default();
             for v in values {
                 list.insert(0, v);
             }
-            list.len() as i64
+            let len = list.len() as i64;
+            state.notify_waiters(key);
+            len
         };
         self.bump_version(key);
         count
     }
 
     fn lpop(&self, key: &str) -> Option<String> {
-        let result = self.lists.lock().unwrap().get_mut(key)?.remove(0);
+        let result = self.lists.lock().unwrap().data.get_mut(key)?.remove(0);
         self.bump_version(key);
         Some(result)
     }
 
     fn lpop_count(&self, key: &str, count: usize) -> Vec<String> {
         let result = {
-            let mut lists = self.lists.lock().unwrap();
-            let Some(list) = lists.get_mut(key) else { return vec![] };
+            let mut state = self.lists.lock().unwrap();
+            let Some(list) = state.data.get_mut(key) else { return vec![] };
             let n = count.min(list.len());
             list.drain(..n).collect::<Vec<_>>()
         };
@@ -123,15 +159,15 @@ impl StorePort for InMemoryStore {
     }
 
     fn rpop(&self, key: &str) -> Option<String> {
-        let result = self.lists.lock().unwrap().get_mut(key)?.pop()?;
+        let result = self.lists.lock().unwrap().data.get_mut(key)?.pop()?;
         self.bump_version(key);
         Some(result)
     }
 
     fn lrange(&self, key: &str, start: i64, stop: i64) -> Vec<String> {
-        let map = self.lists.lock().unwrap();
-        let list = match map.get(key) {
-            Some(list) => list,
+        let state = self.lists.lock().unwrap();
+        let list = match state.data.get(key) {
+            Some(l) => l,
             None => return vec![],
         };
         let len = list.len() as i64;
@@ -140,59 +176,40 @@ impl StorePort for InMemoryStore {
         if start > stop || start >= len {
             return vec![];
         }
-        let start = start.max(0) as usize;
-        let stop = (stop + 1).min(len) as usize;
-        list[start..stop].to_vec()
+        list[start.max(0) as usize..(stop + 1).min(len) as usize].to_vec()
     }
 
     fn lrem(&self, key: &str, count: i64, value: &str) -> i64 {
         let removed = {
-            let mut map = self.lists.lock().unwrap();
-            let Some(list) = map.get_mut(key) else {
-                return 0;
-            };
+            let mut state = self.lists.lock().unwrap();
+            let Some(list) = state.data.get_mut(key) else { return 0 };
             if count == 0 {
                 let before = list.len();
                 list.retain(|v| v != value);
-                list.len() as i64 - (before as i64 - list.len() as i64)
+                (before - list.len()) as i64
             } else if count > 0 {
                 let mut removed = 0;
                 let mut i = 0;
                 while i < list.len() && removed < count {
-                    if list[i] == value {
-                        list.remove(i);
-                        removed += 1;
-                    } else {
-                        i += 1;
-                    }
+                    if list[i] == value { list.remove(i); removed += 1; } else { i += 1; }
                 }
                 removed
             } else {
                 let mut removed = 0;
-                let mut i = (list.len() as i64 - 1) as isize;
+                let mut i = list.len() as isize - 1;
                 while i >= 0 && removed < -count {
-                    if list[i as usize] == value {
-                        list.remove(i as usize);
-                        removed += 1;
-                    }
+                    if list[i as usize] == value { list.remove(i as usize); removed += 1; }
                     i -= 1;
                 }
                 removed
             }
         };
-        if removed > 0 {
-            self.bump_version(key);
-        }
+        if removed > 0 { self.bump_version(key); }
         removed
     }
 
     fn llen(&self, key: &str) -> i64 {
-        self.lists
-            .lock()
-            .unwrap()
-            .get(key)
-            .map(|l| l.len() as i64)
-            .unwrap_or(0)
+        self.lists.lock().unwrap().data.get(key).map(|l| l.len() as i64).unwrap_or(0)
     }
 
     fn get_type(&self, key: &str) -> Option<String> {
@@ -206,11 +223,11 @@ impl StorePort for InMemoryStore {
             return Some("zset".to_string());
         }
         drop(map);
-        let map = self.lists.lock().unwrap();
-        if map.contains_key(key) {
+        let state = self.lists.lock().unwrap();
+        if state.data.contains_key(key) {
             return Some("list".to_string());
         }
-        drop(map);
+        drop(state);
         let map = self.streams.lock().unwrap();
         if map.contains_key(key) {
             return Some("stream".to_string());
