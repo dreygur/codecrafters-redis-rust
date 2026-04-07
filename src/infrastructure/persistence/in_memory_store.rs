@@ -10,6 +10,7 @@ use crate::domain::DomainError;
 pub struct InMemoryStore {
     strings: Arc<Mutex<HashMap<String, Entry>>>,
     zsets: Arc<Mutex<HashMap<String, SortedSet>>>,
+    lists: Arc<Mutex<HashMap<String, Vec<String>>>>,
     key_versions: Arc<Mutex<HashMap<String, u64>>>,
 }
 
@@ -18,6 +19,7 @@ impl InMemoryStore {
         Self {
             strings: Arc::new(Mutex::new(HashMap::new())),
             zsets: Arc::new(Mutex::new(HashMap::new())),
+            lists: Arc::new(Mutex::new(HashMap::new())),
             key_versions: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -73,6 +75,17 @@ impl StorePort for InMemoryStore {
         };
         self.bump_version(key);
         Ok(new_val)
+    }
+
+    fn rpush(&self, key: &str, value: String) -> i64 {
+        let count = {
+            let mut map = self.lists.lock().unwrap();
+            let list = map.entry(key.to_string()).or_insert_with(Vec::new);
+            list.push(value);
+            list.len() as i64
+        };
+        self.bump_version(key);
+        count
     }
 
     fn zadd(&self, key: &str, pairs: Vec<(f64, String)>) -> i64 {
@@ -191,6 +204,7 @@ impl Clone for InMemoryStore {
         Self {
             strings: self.strings.clone(),
             zsets: self.zsets.clone(),
+            lists: self.lists.clone(),
             key_versions: self.key_versions.clone(),
         }
     }

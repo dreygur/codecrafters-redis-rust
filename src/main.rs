@@ -298,6 +298,15 @@ async fn handle_connection(
                         }
                     }
 
+                    "RPUSH" => {
+                        if args.len() < 3 {
+                            RespEncoder::error("wrong number of arguments for 'rpush' command")
+                        } else {
+                            let count = store.rpush(&args[1], args[2].clone());
+                            RespEncoder::integer(count)
+                        }
+                    }
+
                     "ZADD" => {
                         if args.len() < 4 || (args.len() - 2) % 2 != 0 {
                             RespEncoder::error("wrong number of arguments for 'zadd' command")

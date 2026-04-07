@@ -6,6 +6,8 @@ pub trait StorePort: Send + Sync {
     fn set(&self, key: String, value: String, ttl_millis: Option<u64>);
     fn incr(&self, key: &str) -> Result<i64, DomainError>;
 
+    fn rpush(&self, key: &str, value: String) -> i64;
+
     fn zadd(&self, key: &str, pairs: Vec<(f64, String)>) -> i64;
     fn zrank(&self, key: &str, member: &str) -> Option<i64>;
     fn zrange(&self, key: &str, start: i64, stop: i64) -> Vec<String>;
