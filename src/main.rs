@@ -149,15 +149,20 @@ async fn handle_connection(
                             }
                         }
                         Some("SETUSER") => {
-                            if args.len() < 4 || args[2] != ">" {
+                            if args.len() < 4 {
                                 RespEncoder::error("wrong number of arguments for 'acl setuser' command")
                             } else {
                                 let username = args[1].as_str();
-                                let password = args[3].clone();
-                                if acl.set_user_password(username, password) {
-                                    RespEncoder::simple_string("OK")
+                                let password_arg = &args[3];
+                                if !password_arg.starts_with('>') {
+                                    RespEncoder::error("syntax error")
                                 } else {
-                                    RespEncoder::error("ERR user does not exist")
+                                    let password = password_arg[1..].to_string();
+                                    if acl.set_user_password(username, password) {
+                                        RespEncoder::simple_string("OK")
+                                    } else {
+                                        RespEncoder::error("ERR user does not exist")
+                                    }
                                 }
                             }
                         }
