@@ -1,6 +1,6 @@
 use bytes::Bytes;
 
-use crate::{geo, resp, store::StoreService};
+use crate::{error::RedisError, geo, resp, store::StoreService};
 
 pub fn dispatch(args: &[String], store: &StoreService) -> Bytes {
     match args[0].to_uppercase().as_str() {
@@ -27,20 +27,20 @@ pub fn dispatch(args: &[String], store: &StoreService) -> Bytes {
 fn ping(args: &[String]) -> Bytes {
     match args.get(1) {
         Some(msg) => resp::bulk_string(msg),
-        None => Bytes::from_static(b"+PONG\r\n"),
+        None => resp::simple_string("PONG"),
     }
 }
 
 fn echo(args: &[String]) -> Bytes {
     match args.get(1) {
         Some(arg) => resp::bulk_string(arg),
-        None => resp::error("wrong number of arguments"),
+        None => resp::error(&RedisError::WrongArgCount.to_string()),
     }
 }
 
 fn set(args: &[String], store: &StoreService) -> Bytes {
     if args.len() < 3 {
-        return resp::error("wrong number of arguments");
+        return resp::error(&RedisError::WrongArgCount.to_string());
     }
 
     let px: Option<u64> = match args.get(3).map(|s| s.to_uppercase()).as_deref() {
@@ -52,12 +52,12 @@ fn set(args: &[String], store: &StoreService) -> Bytes {
     };
 
     store.set(args[1].clone(), args[2].clone(), px);
-    Bytes::from_static(b"+OK\r\n")
+    resp::simple_string("OK")
 }
 
 fn get(args: &[String], store: &StoreService) -> Bytes {
     if args.len() < 2 {
-        return resp::error("wrong number of arguments");
+        return resp::error(&RedisError::WrongArgCount.to_string());
     }
 
     match store.get(&args[1]) {
@@ -68,7 +68,7 @@ fn get(args: &[String], store: &StoreService) -> Bytes {
 
 fn incr(args: &[String], store: &StoreService) -> Bytes {
     if args.len() < 2 {
-        return resp::error("wrong number of arguments");
+        return resp::error(&RedisError::WrongArgCount.to_string());
     }
 
     match store.incr(&args[1]) {
@@ -80,14 +80,14 @@ fn incr(args: &[String], store: &StoreService) -> Bytes {
 fn subscribe(args: &[String]) -> Bytes {
     match args.get(1) {
         Some(channel) => subscribe_response(channel, 1),
-        None => resp::error("wrong number of arguments"),
+        None => resp::error(&RedisError::WrongArgCount.to_string()),
     }
 }
 
 fn zadd(args: &[String], store: &StoreService) -> Bytes {
     // ZADD key score member [score member ...]
     if args.len() < 4 || (args.len() - 2) % 2 != 0 {
-        return resp::error("wrong number of arguments");
+        return resp::error(&RedisError::WrongArgCount.to_string());
     }
     let key = &args[1];
     let pairs: Option<Vec<(f64, String)>> = args[2..]
@@ -102,7 +102,7 @@ fn zadd(args: &[String], store: &StoreService) -> Bytes {
 
 fn zrank(args: &[String], store: &StoreService) -> Bytes {
     if args.len() < 3 {
-        return resp::error("wrong number of arguments");
+        return resp::error(&RedisError::WrongArgCount.to_string());
     }
     match store.zrank(&args[1], &args[2]) {
         Some(rank) => resp::integer(rank),
@@ -112,7 +112,7 @@ fn zrank(args: &[String], store: &StoreService) -> Bytes {
 
 fn zrange(args: &[String], store: &StoreService) -> Bytes {
     if args.len() < 4 {
-        return resp::error("wrong number of arguments");
+        return resp::error(&RedisError::WrongArgCount.to_string());
     }
     let (Ok(start), Ok(stop)) = (args[2].parse::<i64>(), args[3].parse::<i64>()) else {
         return resp::error("value is not an integer");
@@ -123,14 +123,14 @@ fn zrange(args: &[String], store: &StoreService) -> Bytes {
 
 fn zcard(args: &[String], store: &StoreService) -> Bytes {
     if args.len() < 2 {
-        return resp::error("wrong number of arguments");
+        return resp::error(&RedisError::WrongArgCount.to_string());
     }
     resp::integer(store.zcard(&args[1]))
 }
 
 fn zscore(args: &[String], store: &StoreService) -> Bytes {
     if args.len() < 3 {
-        return resp::error("wrong number of arguments");
+        return resp::error(&RedisError::WrongArgCount.to_string());
     }
     match store.zscore(&args[1], &args[2]) {
         Some(score) => resp::bulk_string(&score.to_string()),
@@ -140,7 +140,7 @@ fn zscore(args: &[String], store: &StoreService) -> Bytes {
 
 fn zrem(args: &[String], store: &StoreService) -> Bytes {
     if args.len() < 3 {
-        return resp::error("wrong number of arguments");
+        return resp::error(&RedisError::WrongArgCount.to_string());
     }
     resp::integer(store.zrem(&args[1], &args[2..].to_vec()))
 }
@@ -152,7 +152,7 @@ fn zrem(args: &[String], store: &StoreService) -> Bytes {
 fn geoadd(args: &[String], store: &StoreService) -> Bytes {
     // GEOADD key longitude latitude member [longitude latitude member ...]
     if args.len() < 5 || (args.len() - 2) % 3 != 0 {
-        return resp::error("wrong number of arguments");
+        return resp::error(&RedisError::WrongArgCount.to_string());
     }
     let key = &args[1];
     let mut added = 0i64;
@@ -173,7 +173,7 @@ fn geoadd(args: &[String], store: &StoreService) -> Bytes {
 fn geopos(args: &[String], store: &StoreService) -> Bytes {
     // GEOPOS key member [member ...]
     if args.len() < 3 {
-        return resp::error("wrong number of arguments");
+        return resp::error(&RedisError::WrongArgCount.to_string());
     }
     let key = &args[1];
     let items = args[2..]
@@ -183,7 +183,7 @@ fn geopos(args: &[String], store: &StoreService) -> Bytes {
                 resp::bulk_string(&format!("{lon}")),
                 resp::bulk_string(&format!("{lat}")),
             ]),
-            None => resp::null_bulk(),
+            None => resp::null_array(),
         })
         .collect();
     resp::array(items)
@@ -192,7 +192,7 @@ fn geopos(args: &[String], store: &StoreService) -> Bytes {
 fn geodist(args: &[String], store: &StoreService) -> Bytes {
     // GEODIST key member1 member2 [m|km|mi|ft]
     if args.len() < 4 {
-        return resp::error("wrong number of arguments");
+        return resp::error(&RedisError::WrongArgCount.to_string());
     }
     let unit = args.get(4).map(String::as_str).unwrap_or("m");
     match store.geodist(&args[1], &args[2], &args[3]) {
@@ -205,7 +205,7 @@ fn geosearch(args: &[String], store: &StoreService) -> Bytes {
     // GEOSEARCH key FROMLONLAT lon lat BYRADIUS radius unit [ASC|DESC]
     // GEOSEARCH key FROMMEMBER member  BYRADIUS radius unit [ASC|DESC]
     if args.len() < 7 {
-        return resp::error("wrong number of arguments");
+        return resp::error(&RedisError::WrongArgCount.to_string());
     }
     let key = &args[1];
     let mut i = 2;

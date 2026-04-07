@@ -1,16 +1,56 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 pub struct Session {
     tx_queue: Option<Vec<Vec<String>>>,
     subscriptions: HashSet<String>,
+    current_user: String,
+    authenticated: bool,
+    /// Key → version recorded at WATCH time. Empty when no keys are watched.
+    watched: HashMap<String, u64>,
 }
 
 impl Session {
-    pub fn new() -> Self {
+    /// `pre_authenticated` should be true when the default user has the nopass flag.
+    pub fn new(pre_authenticated: bool) -> Self {
         Self {
             tx_queue: None,
             subscriptions: HashSet::new(),
+            current_user: "default".to_string(),
+            authenticated: pre_authenticated,
+            watched: HashMap::new(),
         }
+    }
+
+    // -- auth --
+
+    pub fn is_authenticated(&self) -> bool {
+        self.authenticated
+    }
+
+    pub fn current_user(&self) -> &str {
+        &self.current_user
+    }
+
+    pub fn authenticate(&mut self, username: String) {
+        self.current_user = username;
+        self.authenticated = true;
+    }
+
+    // -- watch --
+
+    /// Records the version of a key at WATCH time.
+    pub fn watch(&mut self, key: &str, version: u64) {
+        self.watched.insert(key.to_string(), version);
+    }
+
+    /// Returns the map of watched key → version recorded at WATCH time.
+    pub fn watched_versions(&self) -> &HashMap<String, u64> {
+        &self.watched
+    }
+
+    /// Clears all watched keys (called on EXEC, DISCARD, and UNWATCH).
+    pub fn unwatch(&mut self) {
+        self.watched.clear();
     }
 
     // -- transaction --

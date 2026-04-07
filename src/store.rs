@@ -28,6 +28,8 @@ impl Entry {
 pub struct StoreService {
     strings: Arc<Mutex<HashMap<String, Entry>>>,
     zsets: Arc<Mutex<HashMap<String, SortedSet>>>,
+    /// Monotonically increasing version counter per key — used by WATCH.
+    key_versions: Arc<Mutex<HashMap<String, u64>>>,
 }
 
 impl StoreService {
@@ -35,7 +37,22 @@ impl StoreService {
         Self {
             strings: Arc::new(Mutex::new(HashMap::new())),
             zsets: Arc::new(Mutex::new(HashMap::new())),
+            key_versions: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Returns the current version of a key (0 if never written).
+    pub fn key_version(&self, key: &str) -> u64 {
+        *self.key_versions.lock().unwrap().get(key).unwrap_or(&0)
+    }
+
+    fn bump_version(&self, key: &str) {
+        *self
+            .key_versions
+            .lock()
+            .unwrap()
+            .entry(key.to_string())
+            .or_insert(0) += 1;
     }
 
     // -- string operations --
@@ -56,24 +73,29 @@ impl StoreService {
         self.strings
             .lock()
             .unwrap()
-            .insert(key, Entry::new(value, px));
+            .insert(key.clone(), Entry::new(value, px));
+        self.bump_version(&key);
     }
 
     pub fn incr(&self, key: &str) -> Result<i64, RedisError> {
-        let mut map = self.strings.lock().unwrap();
-        let current = match map.get(key) {
-            Some(entry) if entry.is_expired() => {
-                map.remove(key);
-                0i64
-            }
-            Some(entry) => match entry.value.parse::<i64>() {
-                Ok(n) => n,
-                Err(_) => return Err(RedisError::NotAnInteger),
-            },
-            None => 0i64,
+        let new_val = {
+            let mut map = self.strings.lock().unwrap();
+            let current = match map.get(key) {
+                Some(entry) if entry.is_expired() => {
+                    map.remove(key);
+                    0i64
+                }
+                Some(entry) => match entry.value.parse::<i64>() {
+                    Ok(n) => n,
+                    Err(_) => return Err(RedisError::NotAnInteger),
+                },
+                None => 0i64,
+            };
+            let new_val = current + 1;
+            map.insert(key.to_string(), Entry::new(new_val.to_string(), None));
+            new_val
         };
-        let new_val = current + 1;
-        map.insert(key.to_string(), Entry::new(new_val.to_string(), None));
+        self.bump_version(key);
         Ok(new_val)
     }
 
@@ -81,12 +103,16 @@ impl StoreService {
 
     /// Adds/updates members. Returns the number of newly added members.
     pub fn zadd(&self, key: &str, pairs: Vec<(f64, String)>) -> i64 {
-        let mut map = self.zsets.lock().unwrap();
-        let zset = map.entry(key.to_string()).or_insert_with(SortedSet::new);
-        pairs
-            .into_iter()
-            .filter(|(score, member)| zset.add(*score, member.clone()))
-            .count() as i64
+        let count = {
+            let mut map = self.zsets.lock().unwrap();
+            let zset = map.entry(key.to_string()).or_insert_with(SortedSet::new);
+            pairs
+                .into_iter()
+                .filter(|(score, member)| zset.add(*score, member.clone()))
+                .count() as i64
+        };
+        self.bump_version(key);
+        count
     }
 
     /// Returns the 0-based rank of a member, or `None` if not found.
@@ -124,15 +150,34 @@ impl StoreService {
         self.zsets.lock().unwrap().get(key)?.score(member)
     }
 
+    /// Removes members. Returns the number that were actually removed.
+    pub fn zrem(&self, key: &str, members: &[String]) -> i64 {
+        let count = {
+            let mut map = self.zsets.lock().unwrap();
+            let Some(zset) = map.get_mut(key) else {
+                return 0;
+            };
+            members.iter().filter(|m| zset.remove(m)).count() as i64
+        };
+        if count > 0 {
+            self.bump_version(key);
+        }
+        count
+    }
+
     // -- geo operations (backed by zsets; score = 52-bit geohash as f64) --
 
     /// Adds a member. Returns `true` if the member is new.
     pub fn geoadd(&self, key: &str, lon: f64, lat: f64, member: String) -> bool {
         let score = geo::encode(lon, lat);
-        let mut map = self.zsets.lock().unwrap();
-        map.entry(key.to_string())
-            .or_insert_with(SortedSet::new)
-            .add(score, member)
+        let is_new = {
+            let mut map = self.zsets.lock().unwrap();
+            map.entry(key.to_string())
+                .or_insert_with(SortedSet::new)
+                .add(score, member)
+        };
+        self.bump_version(key);
+        is_new
     }
 
     /// Returns decoded (lon, lat) for a member, or `None` if not found.
@@ -169,14 +214,5 @@ impl StoreService {
                 (dist <= radius_m).then_some((member, dist))
             })
             .collect()
-    }
-
-    /// Removes members. Returns the number that were actually removed.
-    pub fn zrem(&self, key: &str, members: &[String]) -> i64 {
-        let mut map = self.zsets.lock().unwrap();
-        let Some(zset) = map.get_mut(key) else {
-            return 0;
-        };
-        members.iter().filter(|m| zset.remove(m)).count() as i64
     }
 }

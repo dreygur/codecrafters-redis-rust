@@ -31,8 +31,18 @@ pub fn error(msg: &str) -> Bytes {
     Bytes::from(format!("-ERR {}\r\n", msg))
 }
 
+/// Sends a raw error without the `ERR` prefix — for `NOAUTH`, `WRONGPASS`, etc.
+pub fn raw_error(kind_and_msg: &str) -> Bytes {
+    Bytes::from(format!("-{}\r\n", kind_and_msg))
+}
+
 pub fn null_bulk() -> Bytes {
     Bytes::from_static(b"$-1\r\n")
+}
+
+/// Null array — returned by EXEC when a watched key was modified.
+pub fn null_array() -> Bytes {
+    Bytes::from_static(b"*-1\r\n")
 }
 
 pub fn array(elements: Vec<Bytes>) -> Bytes {
