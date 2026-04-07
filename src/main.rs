@@ -3,13 +3,15 @@ mod domain;
 mod infrastructure;
 mod presentation;
 
+use std::sync::Arc;
+
+use application::ports::{AclPort, PubSubPort, StorePort};
+use domain::entities::Session;
+use infrastructure::networking::resp::RespEncoder;
 use infrastructure::persistence::in_memory_store::InMemoryStore;
 use infrastructure::services::acl_service::AclService;
 use infrastructure::services::pubsub_service::PubSubService;
-use infrastructure::networking::resp::RespEncoder;
-use infrastructure::geo::GeoUtils;
-use application::ports::{StorePort, AclPort, PubSubPort};
-use domain::entities::Session;
+use presentation::command::router::CommandRouter;
 
 const ADDR: &str = "127.0.0.1:6379";
 
@@ -21,9 +23,9 @@ async fn main() {
         .find(|w| w[0] == "--requirepass")
         .map(|w| w[1].clone());
 
-    let store: InMemoryStore = InMemoryStore::new();
-    let pubsub = PubSubService::new();
-    let acl = AclService::new();
+    let store: Arc<dyn StorePort> = Arc::new(InMemoryStore::new());
+    let pubsub: Arc<dyn PubSubPort> = Arc::new(PubSubService::new());
+    let acl: Arc<dyn AclPort> = Arc::new(AclService::new());
 
     if let Some(password) = requirepass {
         acl.set_default_password(password);
@@ -35,9 +37,9 @@ async fn main() {
     loop {
         match listener.accept().await {
             Ok((stream, _)) => {
-                let store = store.clone();
-                let pubsub = pubsub.clone();
-                let acl = acl.clone();
+                let store = Arc::clone(&store);
+                let pubsub = Arc::clone(&pubsub);
+                let acl = Arc::clone(&acl);
                 tokio::spawn(async move {
                     if let Err(e) = handle_connection(stream, store, pubsub, acl).await {
                         eprintln!("Connection error: {e}");
@@ -51,51 +53,41 @@ async fn main() {
 
 async fn handle_connection(
     stream: tokio::net::TcpStream,
-    store: impl StorePort,
-    pubsub: impl PubSubPort,
-    acl: impl AclPort,
+    store: Arc<dyn StorePort>,
+    pubsub: Arc<dyn PubSubPort>,
+    acl: Arc<dyn AclPort>,
 ) -> anyhow::Result<()> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use bytes::BytesMut;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::sync::mpsc;
 
     const BUF_SIZE: usize = 512;
 
-    let mut buf = [0u8; BUF_SIZE];
-    let mut session = Session::new(acl.is_nopass());
+    let is_nopass = acl.is_nopass();
+    let router = CommandRouter::new(store, acl, pubsub);
+    let mut session = Session::new(is_nopass);
     let (tx, mut rx) = mpsc::unbounded_channel::<bytes::Bytes>();
     let (mut reader, mut writer) = stream.into_split();
+    let mut buf = [0u8; BUF_SIZE];
 
     loop {
         tokio::select! {
             result = reader.read(&mut buf) => {
                 let n = match result? {
-                    0 => {
-                        println!("Client disconnected");
-                        break;
-                    }
+                    0 => { println!("Client disconnected"); break; }
                     n => n,
                 };
 
-                let Some(args) = RespEncoder::parse(&buf[..n]) else {
-                    continue;
-                };
-
+                let Some(args) = RespEncoder::parse(&buf[..n]) else { continue; };
                 let cmd = args[0].to_uppercase();
 
                 if !session.is_authenticated() && cmd != "AUTH" {
-                    writer
-                        .write_all(&RespEncoder::raw_error("NOAUTH Authentication required."))
-                        .await?;
+                    writer.write_all(&RespEncoder::raw_error("NOAUTH Authentication required.")).await?;
                     continue;
                 }
 
                 if session.is_subscribed()
-                    && !matches!(
-                        cmd.as_str(),
-                        "SUBSCRIBE" | "UNSUBSCRIBE" | "PSUBSCRIBE" | "PUNSUBSCRIBE"
-                        | "PING" | "QUIT" | "RESET"
-                    )
+                    && !matches!(cmd.as_str(), "SUBSCRIBE" | "UNSUBSCRIBE" | "PSUBSCRIBE" | "PUNSUBSCRIBE" | "PING" | "QUIT" | "RESET")
                 {
                     let msg = format!(
                         "Can't execute '{}': only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context",
@@ -105,11 +97,13 @@ async fn handle_connection(
                     continue;
                 }
 
-                let response = if session.is_tx_active() && !matches!(cmd.as_str(), "MULTI" | "EXEC" | "DISCARD" | "WATCH") {
+                if session.is_tx_active() && !matches!(cmd.as_str(), "MULTI" | "EXEC" | "DISCARD" | "WATCH") {
                     session.enqueue(args.to_vec());
-                    RespEncoder::simple_string("QUEUED")
-                } else {
-                    match cmd.as_str() {
+                    writer.write_all(&RespEncoder::simple_string("QUEUED")).await?;
+                    continue;
+                }
+
+                let response = match cmd.as_str() {
                     "AUTH" => {
                         let (username, password) = match args.len() {
                             2 => ("default", args[1].as_str()),
@@ -119,7 +113,7 @@ async fn handle_connection(
                                 continue;
                             }
                         };
-                        if acl.authenticate(username, password) {
+                        if router.authenticate(username, password) {
                             session.authenticate(username.to_string());
                             RespEncoder::simple_string("OK")
                         } else {
@@ -127,49 +121,9 @@ async fn handle_connection(
                         }
                     }
 
-                    "ACL" => match args.get(1).map(|s| s.to_uppercase()).as_deref() {
-                        Some("WHOAMI") => RespEncoder::bulk_string(session.current_user()),
-                        Some("GETUSER") => {
-                            let Some(username) = args.get(2).map(String::as_str) else {
-                                writer.write_all(&RespEncoder::error("wrong number of arguments for 'acl getuser' command")).await?;
-                                continue;
-                            };
-                            match (acl.user_flags(username), acl.user_passwords(username)) {
-                                (Some(flags), Some(passwords)) => RespEncoder::array(vec![
-                                    RespEncoder::bulk_string("flags"),
-                                    RespEncoder::array(flags.iter().map(|f| RespEncoder::bulk_string(f)).collect()),
-                                    RespEncoder::bulk_string("passwords"),
-                                    RespEncoder::array(passwords.iter().map(|p| RespEncoder::bulk_string(p)).collect()),
-                                    RespEncoder::bulk_string("commands"),
-                                    RespEncoder::bulk_string("+@all"),
-                                    RespEncoder::bulk_string("keys"),
-                                    RespEncoder::bulk_string(""),
-                                    RespEncoder::bulk_string("channels"),
-                                    RespEncoder::bulk_string("*"),
-                                    RespEncoder::bulk_string("selectors"),
-                                    RespEncoder::array(vec![]),
-                                ]),
-                                _ => RespEncoder::null_bulk(),
-                            }
-                        }
-                        Some("SETUSER") => {
-                            let username = args.get(2).map(String::as_str);
-                            let password_arg = args.get(3).map(String::as_str);
-                            
-                            match (username, password_arg) {
-                                (Some(username), Some(password_with_prefix)) => {
-                                    let password = password_with_prefix.strip_prefix('>').unwrap_or(password_with_prefix);
-                                    if acl.set_user_password(username, password.to_string()) {
-                                        RespEncoder::simple_string("OK")
-                                    } else {
-                                        RespEncoder::error("ERR user does not exist")
-                                    }
-                                }
-                                _ => RespEncoder::error("wrong number of arguments for 'acl setuser' command"),
-                            }
-                        }
-                        _ => RespEncoder::error("unknown ACL subcommand"),
-                    },
+                    "ACL" if args.get(1).map(|s| s.to_uppercase()).as_deref() == Some("WHOAMI") => {
+                        RespEncoder::bulk_string(session.current_user())
+                    }
 
                     "WATCH" => {
                         if session.is_tx_active() {
@@ -178,20 +132,52 @@ async fn handle_connection(
                             RespEncoder::error("wrong number of arguments for 'watch' command")
                         } else {
                             for key in args.iter().skip(1) {
-                                session.watch(key, store.key_version(key));
+                                session.watch(key, router.key_version(key));
                             }
                             RespEncoder::simple_string("OK")
                         }
                     }
+
                     "UNWATCH" => {
                         session.unwatch();
                         RespEncoder::simple_string("OK")
                     }
 
+                    "MULTI" => {
+                        if session.begin_tx() {
+                            RespEncoder::simple_string("OK")
+                        } else {
+                            RespEncoder::error("MULTI calls can not be nested")
+                        }
+                    }
+
+                    "EXEC" => {
+                        if !session.is_tx_active() {
+                            RespEncoder::error("EXEC without MULTI")
+                        } else {
+                            let watched: Vec<(String, u64)> = session.watched_versions()
+                                .iter()
+                                .map(|(k, v)| (k.clone(), *v))
+                                .collect();
+                            let queue = session.execute_tx();
+                            session.unwatch();
+                            router.exec_transaction(&watched, queue)
+                        }
+                    }
+
+                    "DISCARD" => {
+                        if session.discard_tx() {
+                            session.unwatch();
+                            RespEncoder::simple_string("OK")
+                        } else {
+                            RespEncoder::error("DISCARD without MULTI")
+                        }
+                    }
+
                     "SUBSCRIBE" => {
                         args.iter().skip(1).fold(BytesMut::new(), |mut out, channel| {
                             if !session.is_subscribed_to(channel) {
-                                pubsub.subscribe(channel, tx.clone());
+                                router.subscribe(channel, tx.clone());
                             }
                             let count = session.subscribe(channel);
                             out.extend_from_slice(&RespEncoder::array(vec![
@@ -202,9 +188,10 @@ async fn handle_connection(
                             out
                         }).freeze()
                     }
+
                     "UNSUBSCRIBE" => {
                         args.iter().skip(1).fold(BytesMut::new(), |mut out, channel| {
-                            pubsub.unsubscribe(channel, &tx);
+                            router.unsubscribe(channel, &tx);
                             let count = session.unsubscribe(channel);
                             out.extend_from_slice(&RespEncoder::array(vec![
                                 RespEncoder::bulk_string("unsubscribe"),
@@ -214,378 +201,14 @@ async fn handle_connection(
                             out
                         }).freeze()
                     }
-                    "PUBLISH" => {
-                        let channel = args.get(1).map(String::as_str).unwrap_or("");
-                        let message = args.get(2).map(String::as_str).unwrap_or("");
-                        RespEncoder::integer(pubsub.publish(channel, message))
-                    }
-
-                    "MULTI" => {
-                        if session.begin_tx() {
-                            RespEncoder::simple_string("OK")
-                        } else {
-                            RespEncoder::error("MULTI calls can not be nested")
-                        }
-                    }
-                    "EXEC" => {
-                        if !session.is_tx_active() {
-                            RespEncoder::error("EXEC without MULTI")
-                        } else {
-                            let dirty = session.watched_versions().iter().any(|(key, ver)| store.key_version(key) != *ver);
-                            let queue = session.execute_tx();
-                            session.unwatch();
-                            if dirty {
-                                RespEncoder::null_array()
-                            } else {
-                                let results: Vec<bytes::Bytes> = queue.iter().map(|cmd| dispatch_command(cmd, &store)).collect();
-                                RespEncoder::array(results)
-                            }
-                        }
-                    }
-                    "DISCARD" => {
-                        if session.discard_tx() {
-                            session.unwatch();
-                            RespEncoder::simple_string("OK")
-                        } else {
-                            RespEncoder::error("DISCARD without MULTI")
-                        }
-                    }
 
                     "PING" if session.is_subscribed() => RespEncoder::array(vec![
                         RespEncoder::bulk_string("pong"),
                         RespEncoder::bulk_string(""),
                     ]),
 
-                    "PING" => match args.get(1) {
-                        Some(msg) => RespEncoder::bulk_string(msg),
-                        None => RespEncoder::simple_string("PONG"),
-                    },
-                    "ECHO" => match args.get(1) {
-                        Some(arg) => RespEncoder::bulk_string(arg),
-                        None => RespEncoder::error("wrong number of arguments for 'echo' command"),
-                    },
-                    "SET" => {
-                        if args.len() < 3 {
-                            RespEncoder::error("wrong number of arguments for 'set' command")
-                        } else {
-                            let ttl = match args.get(3).map(|s| s.to_uppercase()).as_deref() {
-                                Some("PX") => args.get(4).and_then(|v| v.parse().ok()),
-                                Some("EX") => args.get(4).and_then(|v| v.parse::<u64>().ok().map(|s| s * 1000)),
-                                _ => None,
-                            };
-                            store.set(args[1].clone(), args[2].clone(), ttl);
-                            RespEncoder::simple_string("OK")
-                        }
-                    }
-                    "GET" => {
-                        if args.len() < 2 {
-                            RespEncoder::error("wrong number of arguments for 'get' command")
-                        } else {
-                            match store.get(&args[1]) {
-                                Some(v) => RespEncoder::bulk_string(&v),
-                                None => RespEncoder::null_bulk(),
-                            }
-                        }
-                    }
-                    "INCR" => {
-                        if args.len() < 2 {
-                            RespEncoder::error("wrong number of arguments for 'incr' command")
-                        } else {
-                            match store.incr(&args[1]) {
-                                Ok(n) => RespEncoder::integer(n),
-                                Err(e) => RespEncoder::error(&e.to_string()),
-                            }
-                        }
-                    }
-
-                    "RPUSH" => {
-                        if args.len() < 3 {
-                            RespEncoder::error("wrong number of arguments for 'rpush' command")
-                        } else {
-                            let count = store.rpush(&args[1], args[2..].to_vec());
-                            RespEncoder::integer(count)
-                        }
-                    }
-
-                    "LPUSH" => {
-                        if args.len() < 3 {
-                            RespEncoder::error("wrong number of arguments for 'lpush' command")
-                        } else {
-                            let count = store.lpush(&args[1], args[2..].to_vec());
-                            RespEncoder::integer(count)
-                        }
-                    }
-
-                    "LPOP" => {
-                        if args.len() < 2 {
-                            RespEncoder::error("wrong number of arguments for 'lpop' command")
-                        } else {
-                            match store.lpop(&args[1]) {
-                                Some(v) => RespEncoder::bulk_string(&v),
-                                None => RespEncoder::null_bulk(),
-                            }
-                        }
-                    }
-
-                    "RPOP" => {
-                        if args.len() < 2 {
-                            RespEncoder::error("wrong number of arguments for 'rpop' command")
-                        } else {
-                            match store.rpop(&args[1]) {
-                                Some(v) => RespEncoder::bulk_string(&v),
-                                None => RespEncoder::null_bulk(),
-                            }
-                        }
-                    }
-
-                    "LRANGE" => {
-                        if args.len() < 4 {
-                            RespEncoder::error("wrong number of arguments for 'lrange' command")
-                        } else {
-                            let start: i64 = args[2].parse().unwrap_or(0);
-                            let stop: i64 = args[3].parse().unwrap_or(-1);
-                            let items = store.lrange(&args[1], start, stop);
-                            RespEncoder::array(items.into_iter().map(|s| RespEncoder::bulk_string(&s)).collect())
-                        }
-                    }
-
-                    "LLEN" => {
-                        if args.len() < 2 {
-                            RespEncoder::error("wrong number of arguments for 'llen' command")
-                        } else {
-                            let count = store.llen(&args[1]);
-                            RespEncoder::integer(count)
-                        }
-                    }
-
-                    "LREM" => {
-                        if args.len() < 4 {
-                            RespEncoder::error("wrong number of arguments for 'lrem' command")
-                        } else {
-                            let count: i64 = args[2].parse().unwrap_or(0);
-                            let removed = store.lrem(&args[1], count, &args[3]);
-                            RespEncoder::integer(removed)
-                        }
-                    }
-
-                    "TYPE" => {
-                        if args.len() < 2 {
-                            RespEncoder::error("wrong number of arguments for 'type' command")
-                        } else {
-                            RespEncoder::simple_string(store.get_type(&args[1]).unwrap_or_else(|| "none".to_string()).as_str())
-                        }
-                    }
-
-                    "XADD" => {
-                        if args.len() < 4 {
-                            RespEncoder::error("wrong number of arguments for 'xadd' command")
-                        } else {
-                            let key = &args[1];
-                            let id = &args[2];
-                            let fields: Vec<(String, String)> = args[3..].chunks(2)
-                                .filter(|chunk| chunk.len() == 2)
-                                .map(|chunk| (chunk[0].clone(), chunk[1].clone()))
-                                .collect();
-                            match store.xadd(key, id, fields) {
-                                Some(id) => RespEncoder::bulk_string(&id),
-                                None => RespEncoder::error("invalid ID"),
-                            }
-                        }
-                    }
-
-                    "XRANGE" => {
-                        if args.len() < 4 {
-                            RespEncoder::error("wrong number of arguments for 'xrange' command")
-                        } else {
-                            let start = &args[2];
-                            let end = &args[3];
-                            let count = args.get(5).and_then(|c| c.parse().ok());
-                            let entries = store.xrange(&args[1], start, end, count);
-                            let mut response = vec![];
-                            for (id, fields) in entries {
-                                let mut field_arr = vec![RespEncoder::bulk_string(&id)];
-                                for (k, v) in fields {
-                                    field_arr.push(RespEncoder::bulk_string(&k));
-                                    field_arr.push(RespEncoder::bulk_string(&v));
-                                }
-                                response.push(RespEncoder::array(field_arr));
-                            }
-                            RespEncoder::array(response)
-                        }
-                    }
-
-                    "XREAD" => {
-                        if args.len() < 5 || args[1] != "STREAMS" {
-                            RespEncoder::error("wrong number of arguments for 'xread' command")
-                        } else {
-                            let mut i = 2;
-                            let mut keys = vec![];
-                            let mut ids = vec![];
-                            while i < args.len() - 1 {
-                                keys.push(args[i].clone());
-                                ids.push(args[i + 1].clone());
-                                i += 2;
-                            }
-                            let results = store.xread(&keys, &ids);
-                            let mut response = vec![];
-                            for (key, entries) in results {
-                                let mut key_arr = vec![RespEncoder::bulk_string(&key)];
-                                let mut entries_arr = vec![];
-                                for (id, fields) in entries {
-                                    let mut entry_arr = vec![RespEncoder::bulk_string(&id)];
-                                    for (k, v) in fields {
-                                        entry_arr.push(RespEncoder::bulk_string(&k));
-                                        entry_arr.push(RespEncoder::bulk_string(&v));
-                                    }
-                                    entries_arr.push(RespEncoder::array(entry_arr));
-                                }
-                                key_arr.push(RespEncoder::array(entries_arr));
-                                response.push(RespEncoder::array(key_arr));
-                            }
-                            if response.is_empty() {
-                                RespEncoder::null_array()
-                            } else {
-                                RespEncoder::array(response)
-                            }
-                        }
-                    }
-
-                    "ZADD" => {
-                        if args.len() < 4 || (args.len() - 2) % 2 != 0 {
-                            RespEncoder::error("wrong number of arguments for 'zadd' command")
-                        } else {
-                            let pairs: Option<Vec<(f64, String)>> = args[2..].chunks(2).map(|chunk| {
-                                Some((chunk[0].parse::<f64>().ok()?, chunk[1].clone()))
-                            }).collect();
-                            match pairs {
-                                Some(pairs) => RespEncoder::integer(store.zadd(&args[1], pairs)),
-                                None => RespEncoder::error("value is not a valid float"),
-                            }
-                        }
-                    }
-                    "ZRANGE" => {
-                        if args.len() < 4 {
-                            RespEncoder::error("wrong number of arguments for 'zrange' command")
-                        } else {
-                            let start = args[2].parse::<i64>().ok();
-                            let stop = args[3].parse::<i64>().ok();
-                            match (start, stop) {
-                                (Some(start), Some(stop)) => {
-                                    let members = store.zrange(&args[1], start, stop);
-                                    RespEncoder::array(members.iter().map(|m| RespEncoder::bulk_string(m)).collect())
-                                }
-                                _ => RespEncoder::error("value is not an integer"),
-                            }
-                        }
-                    }
-                    "ZRANK" => {
-                        if args.len() < 3 {
-                            RespEncoder::error("wrong number of arguments for 'zrank' command")
-                        } else {
-                            match store.zrank(&args[1], &args[2]) {
-                                Some(rank) => RespEncoder::integer(rank),
-                                None => RespEncoder::null_bulk(),
-                            }
-                        }
-                    }
-                    "ZCARD" => {
-                        if args.len() < 2 {
-                            RespEncoder::error("wrong number of arguments for 'zcard' command")
-                        } else {
-                            RespEncoder::integer(store.zcard(&args[1]))
-                        }
-                    }
-                    "ZSCORE" => {
-                        if args.len() < 3 {
-                            RespEncoder::error("wrong number of arguments for 'zscore' command")
-                        } else {
-                            match store.zscore(&args[1], &args[2]) {
-                                Some(score) => RespEncoder::bulk_string(&score.to_string()),
-                                None => RespEncoder::null_bulk(),
-                            }
-                        }
-                    }
-                    "ZREM" => {
-                        if args.len() < 3 {
-                            RespEncoder::error("wrong number of arguments for 'zrem' command")
-                        } else {
-                            RespEncoder::integer(store.zrem(&args[1], &args[2..].to_vec()))
-                        }
-                    }
-
-                    "GEOADD" => {
-                        if args.len() < 5 || (args.len() - 2) % 3 != 0 {
-                            RespEncoder::error("wrong number of arguments for 'geoadd' command")
-                        } else {
-                            let key = &args[1];
-                            let mut added = 0i64;
-                            let mut coord_error = false;
-                            for chunk in args[2..].chunks(3) {
-                                let lon: Result<f64, _> = chunk[0].parse();
-                                let lat: Result<f64, _> = chunk[1].parse();
-                                if lon.is_err() || lat.is_err() {
-                                    coord_error = true;
-                                    break;
-                                }
-                                let (lon, lat) = (lon.unwrap(), lat.unwrap());
-                                if !GeoUtils::validate(lon, lat) {
-                                    coord_error = true;
-                                    break;
-                                }
-                                if store.geoadd(key, lon, lat, chunk[2].clone()) {
-                                    added += 1;
-                                }
-                            }
-                            if coord_error {
-                                RespEncoder::error("ERR invalid longitude,latitude pair")
-                            } else {
-                                RespEncoder::integer(added)
-                            }
-                        }
-                    }
-                    "GEOPOS" => {
-                        if args.len() < 3 {
-                            RespEncoder::error("wrong number of arguments for 'geopos' command")
-                        } else {
-                            let key = &args[1];
-                            let items = args[2..].iter().map(|member| {
-                                match store.geopos(key, member) {
-                                    Some((lon, lat)) => RespEncoder::array(vec![
-                                        RespEncoder::bulk_string(&format!("{lon}")),
-                                        RespEncoder::bulk_string(&format!("{lat}")),
-                                    ]),
-                                    None => RespEncoder::null_array(),
-                                }
-                            }).collect();
-                            RespEncoder::array(items)
-                        }
-                    }
-                    "GEODIST" => {
-                        if args.len() < 4 {
-                            RespEncoder::error("wrong number of arguments for 'geodist' command")
-                        } else {
-                            let unit = args.get(4).map(String::as_str).unwrap_or("m");
-                            match store.geodist(&args[1], &args[2], &args[3]) {
-                                Some(dist_m) => {
-                                    let converted = GeoUtils::from_metres(dist_m, unit);
-                                    RespEncoder::bulk_string(&format!("{:.4}", converted))
-                                }
-                                None => RespEncoder::null_bulk(),
-                            }
-                        }
-                    }
-                    "GEOSEARCH" => {
-                        if args.len() < 7 {
-                            RespEncoder::error("wrong number of arguments for 'geosearch' command")
-                        } else {
-                            geosearch_handler(&store, &args)
-                        }
-                    }
-
-                    _ => {
-                        RespEncoder::error("unknown command")
-                    }
-                } };
+                    _ => router.dispatch(&args),
+                };
 
                 writer.write_all(&response).await?;
             }
@@ -596,98 +219,4 @@ async fn handle_connection(
     }
 
     Ok(())
-}
-
-fn geosearch_handler(store: &impl StorePort, args: &[String]) -> bytes::Bytes {
-    let key = &args[1];
-    let mut i = 2;
-
-    let center = match args[i].to_uppercase().as_str() {
-        "FROMLONLAT" => {
-            let lon: Result<f64, _> = args[i + 1].parse();
-            let lat: Result<f64, _> = args[i + 2].parse();
-            match (lon, lat) {
-                (Ok(lon), Ok(lat)) => {
-                    i += 3;
-                    Some((lon, lat))
-                }
-                _ => None,
-            }
-        }
-        "FROMMEMBER" => {
-            let pos = store.geopos(key, &args[i + 1]);
-            i += 2;
-            pos
-        }
-        _ => None,
-    };
-
-    if center.is_none() {
-        return RespEncoder::error("syntax error");
-    }
-
-    let (center_lon, center_lat) = center.unwrap();
-
-    if args.get(i).map(String::as_str) != Some("BYRADIUS")
-        && args.get(i).map(|s| s.to_uppercase()).as_deref() != Some("BYRADIUS")
-    {
-        return RespEncoder::error("syntax error");
-    }
-
-    let radius: Result<f64, _> = args[i + 1].parse();
-    let unit = args[i + 2].as_str();
-
-    if radius.is_err() {
-        return RespEncoder::error("value is not a valid float");
-    }
-
-    let radius_m = GeoUtils::to_metres(radius.unwrap(), unit);
-    i += 3;
-
-    let descending = args.get(i).map(|s| s.to_uppercase() == "DESC").unwrap_or(false);
-
-    let mut hits = store.geosearch_radius(key, center_lon, center_lat, radius_m);
-    if descending {
-        hits.sort_by(|a, b| b.1.total_cmp(&a.1));
-    } else {
-        hits.sort_by(|a, b| a.1.total_cmp(&b.1));
-    }
-
-    RespEncoder::array(hits.into_iter().map(|(m, _)| RespEncoder::bulk_string(&m)).collect())
-}
-
-fn dispatch_command(args: &[String], store: &impl StorePort) -> bytes::Bytes {
-    match args[0].to_uppercase().as_str() {
-        "SET" => {
-            if args.len() < 3 {
-                return RespEncoder::error("wrong number of arguments for 'set' command");
-            }
-            let ttl = match args.get(3).map(|s| s.to_uppercase()).as_deref() {
-                Some("PX") => args.get(4).and_then(|v| v.parse().ok()),
-                Some("EX") => args.get(4).and_then(|v| v.parse::<u64>().ok().map(|s| s * 1000)),
-                _ => None,
-            };
-            store.set(args[1].clone(), args[2].clone(), ttl);
-            RespEncoder::simple_string("OK")
-        }
-        "GET" => {
-            if args.len() < 2 {
-                return RespEncoder::error("wrong number of arguments for 'get' command");
-            }
-            match store.get(&args[1]) {
-                Some(v) => RespEncoder::bulk_string(&v),
-                None => RespEncoder::null_bulk(),
-            }
-        }
-        "INCR" => {
-            if args.len() < 2 {
-                return RespEncoder::error("wrong number of arguments for 'incr' command");
-            }
-            match store.incr(&args[1]) {
-                Ok(n) => RespEncoder::integer(n),
-                Err(e) => RespEncoder::error(&e.to_string()),
-            }
-        }
-        _ => RespEncoder::error("unknown command"),
-    }
 }

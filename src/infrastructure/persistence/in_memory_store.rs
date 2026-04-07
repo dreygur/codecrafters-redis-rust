@@ -111,6 +111,17 @@ impl StorePort for InMemoryStore {
         Some(result)
     }
 
+    fn lpop_count(&self, key: &str, count: usize) -> Vec<String> {
+        let result = {
+            let mut lists = self.lists.lock().unwrap();
+            let Some(list) = lists.get_mut(key) else { return vec![] };
+            let n = count.min(list.len());
+            list.drain(..n).collect::<Vec<_>>()
+        };
+        self.bump_version(key);
+        result
+    }
+
     fn rpop(&self, key: &str) -> Option<String> {
         let result = self.lists.lock().unwrap().get_mut(key)?.pop()?;
         self.bump_version(key);

@@ -12,6 +12,14 @@ pub struct AclService {
     users: Arc<Mutex<HashMap<String, User>>>,
 }
 
+impl Clone for AclService {
+    fn clone(&self) -> Self {
+        Self {
+            users: Arc::clone(&self.users),
+        }
+    }
+}
+
 impl AclService {
     pub fn new() -> Self {
         let mut users = HashMap::new();
@@ -97,13 +105,5 @@ impl AclPort for AclService {
     fn user_passwords(&self, username: &str) -> Option<Vec<String>> {
         let users = self.users.lock().unwrap();
         Some(users.get(username)?.passwords.clone())
-    }
-}
-
-impl Clone for AclService {
-    fn clone(&self) -> Self {
-        Self {
-            users: self.users.clone(),
-        }
     }
 }

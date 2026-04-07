@@ -10,6 +10,7 @@ pub trait StorePort: Send + Sync {
     fn rpush(&self, key: &str, values: Vec<String>) -> i64;
     fn lpush(&self, key: &str, values: Vec<String>) -> i64;
     fn lpop(&self, key: &str) -> Option<String>;
+    fn lpop_count(&self, key: &str, count: usize) -> Vec<String>;
     fn rpop(&self, key: &str) -> Option<String>;
     fn lrange(&self, key: &str, start: i64, stop: i64) -> Vec<String>;
     fn lrem(&self, key: &str, count: i64, value: &str) -> i64;

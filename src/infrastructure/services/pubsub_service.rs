@@ -15,6 +15,14 @@ pub struct PubSubService {
     inner: Arc<Mutex<HashMap<String, Vec<Sender>>>>,
 }
 
+impl Clone for PubSubService {
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+}
+
 impl PubSubService {
     pub fn new() -> Self {
         Self {
@@ -59,13 +67,5 @@ impl PubSubPort for PubSubService {
             Err(_) => false,
         });
         count
-    }
-}
-
-impl Clone for PubSubService {
-    fn clone(&self) -> Self {
-        Self {
-            inner: self.inner.clone(),
-        }
     }
 }
