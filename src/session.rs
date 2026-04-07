@@ -55,9 +55,20 @@ impl Session {
         !self.subscriptions.is_empty()
     }
 
+    /// Returns true if the client is already subscribed to the given channel.
+    pub fn is_subscribed_to(&self, channel: &str) -> bool {
+        self.subscriptions.contains(channel)
+    }
+
     /// Subscribes to a channel and returns the new total unique subscription count.
     pub fn subscribe(&mut self, channel: &str) -> i64 {
         self.subscriptions.insert(channel.to_string());
+        self.subscriptions.len() as i64
+    }
+
+    /// Unsubscribes from a channel and returns the remaining subscription count.
+    pub fn unsubscribe(&mut self, channel: &str) -> i64 {
+        self.subscriptions.remove(channel);
         self.subscriptions.len() as i64
     }
 }

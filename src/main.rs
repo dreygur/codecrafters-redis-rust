@@ -4,6 +4,7 @@ mod pubsub;
 mod resp;
 mod server;
 mod session;
+mod sorted_set;
 mod store;
 
 use pubsub::PubSubService;

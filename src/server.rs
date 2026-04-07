@@ -7,7 +7,7 @@ use tokio::{
 };
 
 use crate::{
-    command::{dispatch, subscribe_response},
+    command::{dispatch, subscribe_response, unsubscribe_response},
     pubsub::PubSubService,
     resp,
     session::Session,
@@ -61,8 +61,15 @@ pub async fn handle(stream: TcpStream, store: StoreService, pubsub: PubSubServic
 
                 let response = match cmd.as_str() {
                     "SUBSCRIBE" => args.iter().skip(1).fold(BytesMut::new(), |mut out, channel| {
-                        pubsub.subscribe(channel, tx.clone());
+                        if !session.is_subscribed_to(channel) {
+                            pubsub.subscribe(channel, tx.clone());
+                        }
                         out.extend_from_slice(&subscribe_response(channel, session.subscribe(channel)));
+                        out
+                    }).freeze(),
+                    "UNSUBSCRIBE" => args.iter().skip(1).fold(BytesMut::new(), |mut out, channel| {
+                        pubsub.unsubscribe(channel, &tx);
+                        out.extend_from_slice(&unsubscribe_response(channel, session.unsubscribe(channel)));
                         out
                     }).freeze(),
                     "PUBLISH" => {

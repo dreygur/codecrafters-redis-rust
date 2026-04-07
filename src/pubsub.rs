@@ -32,6 +32,14 @@ impl PubSubService {
             .push(tx);
     }
 
+    /// Removes this connection's sender from the channel's subscriber list.
+    pub fn unsubscribe(&self, channel: &str, tx: &Sender) {
+        let mut map = self.inner.lock().unwrap();
+        if let Some(senders) = map.get_mut(channel) {
+            senders.retain(|s| !s.same_channel(tx));
+        }
+    }
+
     /// Delivers a message to all clients subscribed to the channel.
     /// Prunes dead senders (disconnected clients) automatically.
     /// Returns the number of clients that received the message.
