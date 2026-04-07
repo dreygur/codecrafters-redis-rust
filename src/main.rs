@@ -105,7 +105,7 @@ async fn handle_connection(
                     continue;
                 }
 
-                let response = if session.is_tx_active() && !matches!(cmd.as_str(), "MULTI" | "EXEC" | "DISCARD") {
+                let response = if session.is_tx_active() && !matches!(cmd.as_str(), "MULTI" | "EXEC" | "DISCARD" | "WATCH") {
                     session.enqueue(args.to_vec());
                     RespEncoder::simple_string("QUEUED")
                 } else {
