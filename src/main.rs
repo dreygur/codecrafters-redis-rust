@@ -105,7 +105,11 @@ async fn handle_connection(
                     continue;
                 }
 
-                let response = match cmd.as_str() {
+                let response = if session.is_tx_active() && !matches!(cmd.as_str(), "MULTI" | "EXEC" | "DISCARD") {
+                    session.enqueue(args.to_vec());
+                    RespEncoder::simple_string("QUEUED")
+                } else {
+                    match cmd.as_str() {
                     "AUTH" => {
                         let (username, password) = match args.len() {
                             2 => ("default", args[1].as_str()),
@@ -427,14 +431,9 @@ async fn handle_connection(
                     }
 
                     _ => {
-                        if session.is_tx_active() {
-                            session.enqueue(args.to_vec());
-                            RespEncoder::simple_string("QUEUED")
-                        } else {
-                            RespEncoder::error("unknown command")
-                        }
+                        RespEncoder::error("unknown command")
                     }
-                };
+                } };
 
                 writer.write_all(&response).await?;
             }
