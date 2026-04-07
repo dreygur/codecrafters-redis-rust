@@ -3,6 +3,7 @@ use bytes::{Bytes, BytesMut};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
+    sync::mpsc,
 };
 
 use crate::{
@@ -15,22 +16,29 @@ use crate::{
 
 const BUF_SIZE: usize = 512;
 
-pub async fn handle(mut stream: TcpStream, store: StoreService, pubsub: PubSubService) -> Result<()> {
+pub async fn handle(stream: TcpStream, store: StoreService, pubsub: PubSubService) -> Result<()> {
     let mut buf = [0u8; BUF_SIZE];
     let mut session = Session::new();
+    let (tx, mut rx) = mpsc::unbounded_channel::<Bytes>();
+    let (mut reader, mut writer) = stream.into_split();
 
     loop {
-        match stream.read(&mut buf).await? {
-            0 => {
-                println!("Client disconnected");
-                break;
-            }
-            n => {
+        tokio::select! {
+            result = reader.read(&mut buf) => {
+                let n = match result? {
+                    0 => {
+                        println!("Client disconnected");
+                        break;
+                    }
+                    n => n,
+                };
+
                 let Some(args) = resp::parse(&buf[..n]) else {
                     continue;
                 };
 
                 let cmd = args[0].to_uppercase();
+
                 if session.is_subscribed()
                     && !matches!(
                         cmd.as_str(),
@@ -47,19 +55,20 @@ pub async fn handle(mut stream: TcpStream, store: StoreService, pubsub: PubSubSe
                         "Can't execute '{}': only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context",
                         args[0].to_lowercase()
                     );
-                    stream.write_all(&resp::error(&msg)).await?;
+                    writer.write_all(&resp::error(&msg)).await?;
                     continue;
                 }
 
                 let response = match cmd.as_str() {
                     "SUBSCRIBE" => args.iter().skip(1).fold(BytesMut::new(), |mut out, channel| {
-                        pubsub.subscribe(channel);
+                        pubsub.subscribe(channel, tx.clone());
                         out.extend_from_slice(&subscribe_response(channel, session.subscribe(channel)));
                         out
                     }).freeze(),
                     "PUBLISH" => {
-                        let count = args.get(1).map_or(0, |ch| pubsub.subscriber_count(ch));
-                        resp::integer(count)
+                        let channel = args.get(1).map(String::as_str).unwrap_or("");
+                        let message = args.get(2).map(String::as_str).unwrap_or("");
+                        resp::integer(pubsub.publish(channel, message))
                     }
                     "MULTI" => {
                         if session.begin_tx() {
@@ -98,7 +107,10 @@ pub async fn handle(mut stream: TcpStream, store: StoreService, pubsub: PubSubSe
                     }
                 };
 
-                stream.write_all(&response).await?;
+                writer.write_all(&response).await?;
+            }
+            Some(msg) = rx.recv() => {
+                writer.write_all(&msg).await?;
             }
         }
     }
