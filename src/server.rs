@@ -1,18 +1,25 @@
-use std::{
-    io::{Read, Result, Write},
+use anyhow::Result;
+use bytes::BytesMut;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
 };
 
-use crate::{command::dispatch, resp, store::Store, transaction::TxState};
+use crate::{
+    command::{dispatch, subscribe_response},
+    resp,
+    session::Session,
+    store::StoreService,
+};
 
 const BUF_SIZE: usize = 512;
 
-pub fn handle(mut stream: TcpStream, store: Store) -> Result<()> {
-    let mut buf = [0; BUF_SIZE];
-    let mut tx = TxState::new();
+pub async fn handle(mut stream: TcpStream, store: StoreService) -> Result<()> {
+    let mut buf = [0u8; BUF_SIZE];
+    let mut session = Session::new();
 
     loop {
-        match stream.read(&mut buf)? {
+        match stream.read(&mut buf).await? {
             0 => {
                 println!("Client disconnected");
                 break;
@@ -23,43 +30,49 @@ pub fn handle(mut stream: TcpStream, store: Store) -> Result<()> {
                 };
 
                 let response = match args[0].to_uppercase().as_str() {
+                    "SUBSCRIBE" => {
+                        let mut out = BytesMut::new();
+                        for channel in args.iter().skip(1) {
+                            let count = session.subscribe(channel);
+                            out.extend_from_slice(&subscribe_response(channel, count));
+                        }
+                        stream.write_all(&out).await?;
+                        continue;
+                    }
                     "MULTI" => {
-                        if tx.is_active() {
-                            resp::error("MULTI calls can not be nested")
+                        if session.begin_tx() {
+                            bytes::Bytes::from_static(b"+OK\r\n")
                         } else {
-                            tx.begin();
-                            b"+OK\r\n".to_vec()
+                            resp::error("MULTI calls can not be nested")
                         }
                     }
                     "EXEC" => {
-                        if !tx.is_active() {
+                        if !session.is_tx_active() {
                             resp::error("EXEC without MULTI")
                         } else {
-                            let queue = tx.take_queue();
-                            let results: Vec<Vec<u8>> =
-                                queue.iter().map(|cmd| dispatch(cmd, &store)).collect();
+                            let queue = session.execute_tx();
+                            let results = queue.iter().map(|cmd| dispatch(cmd, &store)).collect();
                             resp::array(results)
                         }
                     }
                     "DISCARD" => {
-                        if !tx.is_active() {
-                            resp::error("DISCARD without MULTI")
+                        if session.discard_tx() {
+                            bytes::Bytes::from_static(b"+OK\r\n")
                         } else {
-                            tx.reset();
-                            b"+OK\r\n".to_vec()
+                            resp::error("DISCARD without MULTI")
                         }
                     }
                     _ => {
-                        if tx.is_active() {
-                            tx.enqueue(args);
-                            b"+QUEUED\r\n".to_vec()
+                        if session.is_tx_active() {
+                            session.enqueue(args);
+                            bytes::Bytes::from_static(b"+QUEUED\r\n")
                         } else {
                             dispatch(&args, &store)
                         }
                     }
                 };
 
-                stream.write_all(&response)?;
+                stream.write_all(&response).await?;
             }
         }
     }

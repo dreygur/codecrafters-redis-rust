@@ -1,27 +1,31 @@
 mod command;
+mod error;
 mod resp;
 mod server;
+mod session;
 mod store;
-mod transaction;
 
-use std::{net::TcpListener, thread};
-
-use store::new_store;
+use store::StoreService;
 
 const ADDR: &str = "127.0.0.1:6379";
 
-fn main() {
-    let listener = TcpListener::bind(ADDR).unwrap();
-    let store = new_store();
+#[tokio::main]
+async fn main() {
+    let listener = tokio::net::TcpListener::bind(ADDR).await.unwrap();
+    let store = StoreService::new();
     println!("Listening on {}", ADDR);
 
-    for stream in listener.incoming() {
-        match stream {
-            Ok(stream) => {
-                let store = std::sync::Arc::clone(&store);
-                thread::spawn(move || server::handle(stream, store));
+    loop {
+        match listener.accept().await {
+            Ok((stream, _)) => {
+                let store = store.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = server::handle(stream, store).await {
+                        eprintln!("Connection error: {e}");
+                    }
+                });
             }
-            Err(e) => eprintln!("Accept error: {}", e),
+            Err(e) => eprintln!("Accept error: {e}"),
         }
     }
 }

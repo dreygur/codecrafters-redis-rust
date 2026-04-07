@@ -1,3 +1,5 @@
+use bytes::{Bytes, BytesMut};
+
 pub fn parse(input: &[u8]) -> Option<Vec<String>> {
     let s = std::str::from_utf8(input).ok()?;
     let mut lines = s.split("\r\n");
@@ -13,28 +15,31 @@ pub fn parse(input: &[u8]) -> Option<Vec<String>> {
     Some(args)
 }
 
-pub fn bulk_string(s: &str) -> Vec<u8> {
-    format!("${}\r\n{}\r\n", s.len(), s).into_bytes()
+pub fn bulk_string(s: &str) -> Bytes {
+    Bytes::from(format!("${}\r\n{}\r\n", s.len(), s))
 }
 
-pub fn simple_string(s: &str) -> Vec<u8> {
-    format!("+{}\r\n", s).into_bytes()
+pub fn simple_string(s: &str) -> Bytes {
+    Bytes::from(format!("+{}\r\n", s))
 }
 
-pub fn integer(n: i64) -> Vec<u8> {
-    format!(":{}\r\n", n).into_bytes()
+pub fn integer(n: i64) -> Bytes {
+    Bytes::from(format!(":{}\r\n", n))
 }
 
-pub fn error(msg: &str) -> Vec<u8> {
-    format!("-ERR {}\r\n", msg).into_bytes()
+pub fn error(msg: &str) -> Bytes {
+    Bytes::from(format!("-ERR {}\r\n", msg))
 }
 
-pub fn array(elements: Vec<Vec<u8>>) -> Vec<u8> {
-    let mut resp = format!("*{}\r\n", elements.len()).into_bytes();
+pub fn null_bulk() -> Bytes {
+    Bytes::from_static(b"$-1\r\n")
+}
+
+pub fn array(elements: Vec<Bytes>) -> Bytes {
+    let mut buf = BytesMut::new();
+    buf.extend_from_slice(format!("*{}\r\n", elements.len()).as_bytes());
     for e in elements {
-        resp.extend(e);
+        buf.extend_from_slice(&e);
     }
-    resp
+    buf.freeze()
 }
-
-pub const NULL_BULK: &[u8] = b"$-1\r\n";
