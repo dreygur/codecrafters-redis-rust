@@ -149,19 +149,19 @@ async fn handle_connection(
                             }
                         }
                         Some("SETUSER") => {
-                            if args.len() < 4 {
-                                RespEncoder::error("wrong number of arguments for 'acl setuser' command")
-                            } else {
-                                let username = args[1].as_str();
-                                let password_with_prefix = &args[3];
-                                let password = password_with_prefix.strip_prefix('>').unwrap_or(password_with_prefix.as_str());
-                                if acl.set_user_password(username, password.to_string()) {
-                                    eprintln!("ACL SETUSER succeeded for {}", username);
-                                    RespEncoder::simple_string("OK")
-                                } else {
-                                    eprintln!("ACL SETUSER failed for {}", username);
-                                    RespEncoder::error("ERR user does not exist")
+                            let username = args.get(2).map(String::as_str);
+                            let password_arg = args.get(3).map(String::as_str);
+                            
+                            match (username, password_arg) {
+                                (Some(username), Some(password_with_prefix)) => {
+                                    let password = password_with_prefix.strip_prefix('>').unwrap_or(password_with_prefix);
+                                    if acl.set_user_password(username, password.to_string()) {
+                                        RespEncoder::simple_string("OK")
+                                    } else {
+                                        RespEncoder::error("ERR user does not exist")
+                                    }
                                 }
+                                _ => RespEncoder::error("wrong number of arguments for 'acl setuser' command"),
                             }
                         }
                         _ => RespEncoder::error("unknown ACL subcommand"),

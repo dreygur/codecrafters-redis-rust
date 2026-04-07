@@ -32,7 +32,6 @@ impl AclService {
         let Some(user) = users.get_mut(username) else {
             return false;
         };
-        eprintln!("ACL: Setting password for user '{}'", username);
         user.nopass = false;
         user.passwords = vec![Self::hash_password(&password)];
         true
