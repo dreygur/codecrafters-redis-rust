@@ -1,0 +1,22 @@
+use crate::domain::entities::SortedSet;
+use crate::domain::DomainError;
+
+pub trait StorePort: Send + Sync {
+    fn get(&self, key: &str) -> Option<String>;
+    fn set(&self, key: String, value: String, ttl_millis: Option<u64>);
+    fn incr(&self, key: &str) -> Result<i64, DomainError>;
+
+    fn zadd(&self, key: &str, pairs: Vec<(f64, String)>) -> i64;
+    fn zrank(&self, key: &str, member: &str) -> Option<i64>;
+    fn zrange(&self, key: &str, start: i64, stop: i64) -> Vec<String>;
+    fn zcard(&self, key: &str) -> i64;
+    fn zscore(&self, key: &str, member: &str) -> Option<f64>;
+    fn zrem(&self, key: &str, members: &[String]) -> i64;
+
+    fn geoadd(&self, key: &str, lon: f64, lat: f64, member: String) -> bool;
+    fn geopos(&self, key: &str, member: &str) -> Option<(f64, f64)>;
+    fn geodist(&self, key: &str, m1: &str, m2: &str) -> Option<f64>;
+    fn geosearch_radius(&self, key: &str, lon: f64, lat: f64, radius_m: f64) -> Vec<(String, f64)>;
+
+    fn key_version(&self, key: &str) -> u64;
+}

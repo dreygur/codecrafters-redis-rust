@@ -6,11 +6,11 @@ use std::{
 use bytes::Bytes;
 use tokio::sync::mpsc;
 
-use crate::resp;
+use crate::application::ports::PubSubPort;
+use crate::infrastructure::networking::resp::RespEncoder;
 
 type Sender = mpsc::UnboundedSender<Bytes>;
 
-#[derive(Clone)]
 pub struct PubSubService {
     inner: Arc<Mutex<HashMap<String, Vec<Sender>>>>,
 }
@@ -21,9 +21,10 @@ impl PubSubService {
             inner: Arc::new(Mutex::new(HashMap::new())),
         }
     }
+}
 
-    /// Registers a sender for the given channel.
-    pub fn subscribe(&self, channel: &str, tx: Sender) {
+impl PubSubPort for PubSubService {
+    fn subscribe(&self, channel: &str, tx: Sender) {
         self.inner
             .lock()
             .unwrap()
@@ -32,22 +33,18 @@ impl PubSubService {
             .push(tx);
     }
 
-    /// Removes this connection's sender from the channel's subscriber list.
-    pub fn unsubscribe(&self, channel: &str, tx: &Sender) {
+    fn unsubscribe(&self, channel: &str, tx: &Sender) {
         let mut map = self.inner.lock().unwrap();
         if let Some(senders) = map.get_mut(channel) {
             senders.retain(|s| !s.same_channel(tx));
         }
     }
 
-    /// Delivers a message to all clients subscribed to the channel.
-    /// Prunes dead senders (disconnected clients) automatically.
-    /// Returns the number of clients that received the message.
-    pub fn publish(&self, channel: &str, message: &str) -> i64 {
-        let msg = resp::array(vec![
-            resp::bulk_string("message"),
-            resp::bulk_string(channel),
-            resp::bulk_string(message),
+    fn publish(&self, channel: &str, message: &str) -> i64 {
+        let msg = RespEncoder::array(vec![
+            RespEncoder::bulk_string("message"),
+            RespEncoder::bulk_string(channel),
+            RespEncoder::bulk_string(message),
         ]);
         let mut map = self.inner.lock().unwrap();
         let Some(senders) = map.get_mut(channel) else {
@@ -62,5 +59,13 @@ impl PubSubService {
             Err(_) => false,
         });
         count
+    }
+}
+
+impl Clone for PubSubService {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+        }
     }
 }
