@@ -77,15 +77,97 @@ impl StorePort for InMemoryStore {
         Ok(new_val)
     }
 
-    fn rpush(&self, key: &str, value: String) -> i64 {
+    fn rpush(&self, key: &str, values: Vec<String>) -> i64 {
         let count = {
             let mut map = self.lists.lock().unwrap();
             let list = map.entry(key.to_string()).or_insert_with(Vec::new);
-            list.push(value);
+            for v in values {
+                list.push(v);
+            }
             list.len() as i64
         };
         self.bump_version(key);
         count
+    }
+
+    fn lpush(&self, key: &str, values: Vec<String>) -> i64 {
+        let count = {
+            let mut map = self.lists.lock().unwrap();
+            let list = map.entry(key.to_string()).or_insert_with(Vec::new);
+            for v in values.into_iter().rev() {
+                list.insert(0, v);
+            }
+            list.len() as i64
+        };
+        self.bump_version(key);
+        count
+    }
+
+    fn lrange(&self, key: &str, start: i64, stop: i64) -> Vec<String> {
+        let map = self.lists.lock().unwrap();
+        let list = match map.get(key) {
+            Some(list) => list,
+            None => return vec![],
+        };
+        let len = list.len() as i64;
+        let start = if start < 0 { len + start } else { start };
+        let stop = if stop < 0 { len + stop } else { stop };
+        if start > stop || start >= len {
+            return vec![];
+        }
+        let start = start.max(0) as usize;
+        let stop = (stop + 1).min(len) as usize;
+        list[start..stop].to_vec()
+    }
+
+    fn lrem(&self, key: &str, count: i64, value: &str) -> i64 {
+        let removed = {
+            let mut map = self.lists.lock().unwrap();
+            let Some(list) = map.get_mut(key) else {
+                return 0;
+            };
+            if count == 0 {
+                let before = list.len();
+                list.retain(|v| v != value);
+                list.len() as i64 - (before as i64 - list.len() as i64)
+            } else if count > 0 {
+                let mut removed = 0;
+                let mut i = 0;
+                while i < list.len() && removed < count {
+                    if list[i] == value {
+                        list.remove(i);
+                        removed += 1;
+                    } else {
+                        i += 1;
+                    }
+                }
+                removed
+            } else {
+                let mut removed = 0;
+                let mut i = (list.len() as i64 - 1) as isize;
+                while i >= 0 && removed < -count {
+                    if list[i as usize] == value {
+                        list.remove(i as usize);
+                        removed += 1;
+                    }
+                    i -= 1;
+                }
+                removed
+            }
+        };
+        if removed > 0 {
+            self.bump_version(key);
+        }
+        removed
+    }
+
+    fn llen(&self, key: &str) -> i64 {
+        self.lists
+            .lock()
+            .unwrap()
+            .get(key)
+            .map(|l| l.len() as i64)
+            .unwrap_or(0)
     }
 
     fn zadd(&self, key: &str, pairs: Vec<(f64, String)>) -> i64 {

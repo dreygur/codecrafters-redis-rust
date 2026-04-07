@@ -302,8 +302,47 @@ async fn handle_connection(
                         if args.len() < 3 {
                             RespEncoder::error("wrong number of arguments for 'rpush' command")
                         } else {
-                            let count = store.rpush(&args[1], args[2].clone());
+                            let count = store.rpush(&args[1], args[2..].to_vec());
                             RespEncoder::integer(count)
+                        }
+                    }
+
+                    "LPUSH" => {
+                        if args.len() < 3 {
+                            RespEncoder::error("wrong number of arguments for 'lpush' command")
+                        } else {
+                            let count = store.lpush(&args[1], args[2..].to_vec());
+                            RespEncoder::integer(count)
+                        }
+                    }
+
+                    "LRANGE" => {
+                        if args.len() < 4 {
+                            RespEncoder::error("wrong number of arguments for 'lrange' command")
+                        } else {
+                            let start: i64 = args[2].parse().unwrap_or(0);
+                            let stop: i64 = args[3].parse().unwrap_or(-1);
+                            let items = store.lrange(&args[1], start, stop);
+                            RespEncoder::array(items.into_iter().map(|s| RespEncoder::bulk_string(&s)).collect())
+                        }
+                    }
+
+                    "LLEN" => {
+                        if args.len() < 2 {
+                            RespEncoder::error("wrong number of arguments for 'llen' command")
+                        } else {
+                            let count = store.llen(&args[1]);
+                            RespEncoder::integer(count)
+                        }
+                    }
+
+                    "LREM" => {
+                        if args.len() < 4 {
+                            RespEncoder::error("wrong number of arguments for 'lrem' command")
+                        } else {
+                            let count: i64 = args[2].parse().unwrap_or(0);
+                            let removed = store.lrem(&args[1], count, &args[3]);
+                            RespEncoder::integer(removed)
                         }
                     }
 
