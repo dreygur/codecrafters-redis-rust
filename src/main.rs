@@ -4,12 +4,31 @@ use std::{
     net::{TcpListener, TcpStream},
     sync::{Arc, Mutex},
     thread,
+    time::{Duration, Instant},
 };
 
 const ADDR: &str = "127.0.0.1:6379";
 const BUF_SIZE: usize = 512;
 
-type Store = Arc<Mutex<HashMap<String, String>>>;
+struct Entry {
+    value: String,
+    expires_at: Option<Instant>,
+}
+
+impl Entry {
+    fn new(value: String, px: Option<u64>) -> Self {
+        Self {
+            value,
+            expires_at: px.map(|ms| Instant::now() + Duration::from_millis(ms)),
+        }
+    }
+
+    fn is_expired(&self) -> bool {
+        self.expires_at.map_or(false, |t| Instant::now() > t)
+    }
+}
+
+type Store = Arc<Mutex<HashMap<String, Entry>>>;
 
 fn main() {
     let listener = TcpListener::bind(ADDR).unwrap();
@@ -46,6 +65,43 @@ fn bulk_string(s: &str) -> String {
     format!("${}\r\n{}\r\n", s.len(), s)
 }
 
+fn cmd_set(args: &[String], store: &Store) -> Vec<u8> {
+    if args.len() < 3 {
+        return b"-ERR wrong number of arguments\r\n".to_vec();
+    }
+
+    let key = args[1].clone();
+    let value = args[2].clone();
+
+    // Parse optional PX/EX flags
+    let px: Option<u64> = match args.get(3).map(|s| s.to_uppercase()).as_deref() {
+        Some("PX") => args.get(4).and_then(|v| v.parse().ok()),
+        Some("EX") => args
+            .get(4)
+            .and_then(|v| v.parse::<u64>().ok().map(|s| s * 1000)),
+        _ => None,
+    };
+
+    store.lock().unwrap().insert(key, Entry::new(value, px));
+    b"+OK\r\n".to_vec()
+}
+
+fn cmd_get(args: &[String], store: &Store) -> Vec<u8> {
+    if args.len() < 2 {
+        return b"-ERR wrong number of arguments\r\n".to_vec();
+    }
+
+    let mut store = store.lock().unwrap();
+    match store.get(&args[1]) {
+        Some(entry) if entry.is_expired() => {
+            store.remove(&args[1]);
+            b"$-1\r\n".to_vec()
+        }
+        Some(entry) => bulk_string(&entry.value).into_bytes(),
+        None => b"$-1\r\n".to_vec(),
+    }
+}
+
 fn dispatch(args: &[String], store: &Store) -> Vec<u8> {
     match args[0].to_uppercase().as_str() {
         "PING" => b"+PONG\r\n".to_vec(),
@@ -53,25 +109,8 @@ fn dispatch(args: &[String], store: &Store) -> Vec<u8> {
             .get(1)
             .map(|arg| bulk_string(arg).into_bytes())
             .unwrap_or_else(|| b"-ERR wrong number of arguments\r\n".to_vec()),
-        "SET" => {
-            if args.len() < 3 {
-                return b"-ERR wrong number of arguments\r\n".to_vec();
-            }
-            store
-                .lock()
-                .unwrap()
-                .insert(args[1].clone(), args[2].clone());
-            b"+OK\r\n".to_vec()
-        }
-        "GET" => {
-            if args.len() < 2 {
-                return b"-ERR wrong number of arguments\r\n".to_vec();
-            }
-            match store.lock().unwrap().get(&args[1]) {
-                Some(val) => bulk_string(val).into_bytes(),
-                None => b"$-1\r\n".to_vec(),
-            }
-        }
+        "SET" => cmd_set(args, store),
+        "GET" => cmd_get(args, store),
         _ => b"-ERR unknown command\r\n".to_vec(),
     }
 }
