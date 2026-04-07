@@ -363,27 +363,27 @@ async fn handle_connection(
                         } else {
                             let key = &args[1];
                             let mut added = 0i64;
-                            let mut valid = true;
+                            let mut coord_error = false;
                             for chunk in args[2..].chunks(3) {
                                 let lon: Result<f64, _> = chunk[0].parse();
                                 let lat: Result<f64, _> = chunk[1].parse();
                                 if lon.is_err() || lat.is_err() {
-                                    valid = false;
+                                    coord_error = true;
                                     break;
                                 }
                                 let (lon, lat) = (lon.unwrap(), lat.unwrap());
                                 if !GeoUtils::validate(lon, lat) {
-                                    valid = false;
+                                    coord_error = true;
                                     break;
                                 }
                                 if store.geoadd(key, lon, lat, chunk[2].clone()) {
                                     added += 1;
                                 }
                             }
-                            if valid {
-                                RespEncoder::integer(added)
+                            if coord_error {
+                                RespEncoder::error("ERR invalid longitude,latitude pair")
                             } else {
-                                RespEncoder::error("value is not a valid float")
+                                RespEncoder::integer(added)
                             }
                         }
                     }
