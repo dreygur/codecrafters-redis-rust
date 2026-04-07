@@ -78,6 +78,10 @@ pub async fn handle(mut stream: TcpStream, store: StoreService) -> Result<()> {
                             resp::error("DISCARD without MULTI")
                         }
                     }
+                    "PING" if session.is_subscribed() => resp::array(vec![
+                        resp::bulk_string("pong"),
+                        resp::bulk_string(""),
+                    ]),
                     _ => {
                         if session.is_tx_active() {
                             session.enqueue(args);
