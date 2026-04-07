@@ -105,6 +105,18 @@ impl StorePort for InMemoryStore {
         count
     }
 
+    fn lpop(&self, key: &str) -> Option<String> {
+        let result = self.lists.lock().unwrap().get_mut(key)?.remove(0);
+        self.bump_version(key);
+        Some(result)
+    }
+
+    fn rpop(&self, key: &str) -> Option<String> {
+        let result = self.lists.lock().unwrap().get_mut(key)?.pop()?;
+        self.bump_version(key);
+        Some(result)
+    }
+
     fn lrange(&self, key: &str, start: i64, stop: i64) -> Vec<String> {
         let map = self.lists.lock().unwrap();
         let list = match map.get(key) {

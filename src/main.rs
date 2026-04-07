@@ -316,6 +316,28 @@ async fn handle_connection(
                         }
                     }
 
+                    "LPOP" => {
+                        if args.len() < 2 {
+                            RespEncoder::error("wrong number of arguments for 'lpop' command")
+                        } else {
+                            match store.lpop(&args[1]) {
+                                Some(v) => RespEncoder::bulk_string(&v),
+                                None => RespEncoder::null_bulk(),
+                            }
+                        }
+                    }
+
+                    "RPOP" => {
+                        if args.len() < 2 {
+                            RespEncoder::error("wrong number of arguments for 'rpop' command")
+                        } else {
+                            match store.rpop(&args[1]) {
+                                Some(v) => RespEncoder::bulk_string(&v),
+                                None => RespEncoder::null_bulk(),
+                            }
+                        }
+                    }
+
                     "LRANGE" => {
                         if args.len() < 4 {
                             RespEncoder::error("wrong number of arguments for 'lrange' command")
