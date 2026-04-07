@@ -426,7 +426,14 @@ async fn handle_connection(
                         }
                     }
 
-                    _ => RespEncoder::error("unknown command"),
+                    _ => {
+                        if session.is_tx_active() {
+                            session.enqueue(args.to_vec());
+                            RespEncoder::simple_string("QUEUED")
+                        } else {
+                            RespEncoder::error("unknown command")
+                        }
+                    }
                 };
 
                 writer.write_all(&response).await?;
