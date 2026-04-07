@@ -1,5 +1,5 @@
 use anyhow::Result;
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
@@ -29,19 +29,35 @@ pub async fn handle(mut stream: TcpStream, store: StoreService) -> Result<()> {
                     continue;
                 };
 
-                let response = match args[0].to_uppercase().as_str() {
-                    "SUBSCRIBE" => {
-                        let mut out = BytesMut::new();
-                        for channel in args.iter().skip(1) {
-                            let count = session.subscribe(channel);
-                            out.extend_from_slice(&subscribe_response(channel, count));
-                        }
-                        stream.write_all(&out).await?;
-                        continue;
-                    }
+                let cmd = args[0].to_uppercase();
+                if session.is_subscribed()
+                    && !matches!(
+                        cmd.as_str(),
+                        "SUBSCRIBE"
+                            | "UNSUBSCRIBE"
+                            | "PSUBSCRIBE"
+                            | "PUNSUBSCRIBE"
+                            | "PING"
+                            | "QUIT"
+                            | "RESET"
+                    )
+                {
+                    let msg = format!(
+                        "Can't execute '{}': only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context",
+                        args[0].to_lowercase()
+                    );
+                    stream.write_all(&resp::error(&msg)).await?;
+                    continue;
+                }
+
+                let response = match cmd.as_str() {
+                    "SUBSCRIBE" => args.iter().skip(1).fold(BytesMut::new(), |mut out, channel| {
+                        out.extend_from_slice(&subscribe_response(channel, session.subscribe(channel)));
+                        out
+                    }).freeze(),
                     "MULTI" => {
                         if session.begin_tx() {
-                            bytes::Bytes::from_static(b"+OK\r\n")
+                            Bytes::from_static(b"+OK\r\n")
                         } else {
                             resp::error("MULTI calls can not be nested")
                         }
@@ -57,7 +73,7 @@ pub async fn handle(mut stream: TcpStream, store: StoreService) -> Result<()> {
                     }
                     "DISCARD" => {
                         if session.discard_tx() {
-                            bytes::Bytes::from_static(b"+OK\r\n")
+                            Bytes::from_static(b"+OK\r\n")
                         } else {
                             resp::error("DISCARD without MULTI")
                         }
@@ -65,7 +81,7 @@ pub async fn handle(mut stream: TcpStream, store: StoreService) -> Result<()> {
                     _ => {
                         if session.is_tx_active() {
                             session.enqueue(args);
-                            bytes::Bytes::from_static(b"+QUEUED\r\n")
+                            Bytes::from_static(b"+QUEUED\r\n")
                         } else {
                             dispatch(&args, &store)
                         }

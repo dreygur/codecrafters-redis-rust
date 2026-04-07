@@ -50,6 +50,11 @@ impl Session {
 
     // -- subscriptions --
 
+    /// Returns true when the client has at least one active subscription.
+    pub fn is_subscribed(&self) -> bool {
+        !self.subscriptions.is_empty()
+    }
+
     /// Subscribes to a channel and returns the new total unique subscription count.
     pub fn subscribe(&mut self, channel: &str) -> i64 {
         self.subscriptions.insert(channel.to_string());
