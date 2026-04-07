@@ -102,6 +102,31 @@ fn cmd_get(args: &[String], store: &Store) -> Vec<u8> {
     }
 }
 
+fn cmd_incr(args: &[String], store: &Store) -> Vec<u8> {
+    if args.len() < 2 {
+        return b"-ERR wrong number of arguments\r\n".to_vec();
+    }
+
+    let mut store = store.lock().unwrap();
+    let key = &args[1];
+
+    let current = match store.get(key) {
+        Some(entry) if entry.is_expired() => {
+            store.remove(key);
+            0i64
+        }
+        Some(entry) => match entry.value.parse::<i64>() {
+            Ok(n) => n,
+            Err(_) => return b"-ERR value is not an integer or out of range\r\n".to_vec(),
+        },
+        None => 0i64,
+    };
+
+    let new_val = current + 1;
+    store.insert(key.to_string(), Entry::new(new_val.to_string(), None));
+    format!(":{}\r\n", new_val).into_bytes()
+}
+
 fn dispatch(args: &[String], store: &Store) -> Vec<u8> {
     match args[0].to_uppercase().as_str() {
         "PING" => b"+PONG\r\n".to_vec(),
@@ -111,6 +136,7 @@ fn dispatch(args: &[String], store: &Store) -> Vec<u8> {
             .unwrap_or_else(|| b"-ERR wrong number of arguments\r\n".to_vec()),
         "SET" => cmd_set(args, store),
         "GET" => cmd_get(args, store),
+        "INCR" => cmd_incr(args, store),
         _ => b"-ERR unknown command\r\n".to_vec(),
     }
 }
