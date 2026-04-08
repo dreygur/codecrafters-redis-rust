@@ -1,6 +1,16 @@
 use thiserror::Error;
 
 #[derive(Debug, Error)]
+pub enum XAddError {
+    #[error("The ID specified in XADD must be greater than 0-0")]
+    ZeroId,
+    #[error("The ID specified in XADD is equal or smaller than the target stream top item")]
+    NotIncremental,
+    #[error("Invalid stream ID format")]
+    InvalidFormat,
+}
+
+#[derive(Debug, Error)]
 pub enum DomainError {
     #[error("wrong number of arguments")]
     WrongArgCount,

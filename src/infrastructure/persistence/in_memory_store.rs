@@ -153,10 +153,10 @@ impl StorePort for InMemoryStore {
         self.zsets.geosearch_radius(key, lon, lat, radius_m)
     }
 
-    fn xadd(&self, key: &str, id: &str, fields: Vec<(String, String)>) -> Option<String> {
+    fn xadd(&self, key: &str, id: &str, fields: Vec<(String, String)>) -> Result<String, crate::domain::XAddError> {
         let entry_id = self.streams.xadd(key, id, fields)?;
         self.bump_version(key);
-        Some(entry_id)
+        Ok(entry_id)
     }
 
     fn xrange(

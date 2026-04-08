@@ -24,8 +24,8 @@ impl StreamCommands {
             .map(|c| (c[0].clone(), c[1].clone()))
             .collect();
         match self.store.xadd(&args[1], &args[2], fields) {
-            Some(id) => RespEncoder::bulk_string(&id),
-            None => RespEncoder::error("invalid ID"),
+            Ok(id) => RespEncoder::bulk_string(&id),
+            Err(e) => RespEncoder::error(&e.to_string()),
         }
     }
 

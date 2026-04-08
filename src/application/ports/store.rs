@@ -1,5 +1,5 @@
 use crate::domain::entities::SortedSet;
-use crate::domain::DomainError;
+use crate::domain::{DomainError, XAddError};
 
 pub trait StorePort: Send + Sync {
     fn get(&self, key: &str) -> Option<String>;
@@ -28,7 +28,7 @@ pub trait StorePort: Send + Sync {
     fn geodist(&self, key: &str, m1: &str, m2: &str) -> Option<f64>;
     fn geosearch_radius(&self, key: &str, lon: f64, lat: f64, radius_m: f64) -> Vec<(String, f64)>;
 
-    fn xadd(&self, key: &str, id: &str, fields: Vec<(String, String)>) -> Option<String>;
+    fn xadd(&self, key: &str, id: &str, fields: Vec<(String, String)>) -> Result<String, XAddError>;
     fn xrange(
         &self,
         key: &str,
