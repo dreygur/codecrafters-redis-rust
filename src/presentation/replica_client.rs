@@ -86,9 +86,11 @@ async fn handshake_and_receive(
 }
 
 async fn read_simple_response(reader: &mut tokio::net::tcp::OwnedReadHalf) -> anyhow::Result<()> {
-    let mut buf = [0u8; 256];
-    reader.read(&mut buf).await?;
-    Ok(())
+    let mut byte = [0u8; 1];
+    loop {
+        reader.read_exact(&mut byte).await?;
+        if byte[0] == b'\n' { return Ok(()); }
+    }
 }
 
 async fn skip_rdb(reader: &mut tokio::net::tcp::OwnedReadHalf) -> anyhow::Result<()> {
