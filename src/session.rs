@@ -57,8 +57,8 @@ impl Session {
     }
 
     pub fn enqueue(&mut self, args: Vec<String>) {
-        if let Some(q) = &mut self.tx_queue {
-            q.push(args);
+        if let Some(queue) = &mut self.tx_queue {
+            queue.push(args);
         }
     }
 
@@ -82,12 +82,12 @@ impl Session {
         self.subscriptions.contains(channel)
     }
 
-    pub fn subscribe(&mut self, channel: &str) -> i64 {
+    pub fn subscribe_to(&mut self, channel: &str) -> i64 {
         self.subscriptions.insert(channel.to_string());
         self.subscriptions.len() as i64
     }
 
-    pub fn unsubscribe(&mut self, channel: &str) -> i64 {
+    pub fn unsubscribe_from(&mut self, channel: &str) -> i64 {
         self.subscriptions.remove(channel);
         self.subscriptions.len() as i64
     }

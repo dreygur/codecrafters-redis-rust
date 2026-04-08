@@ -1,42 +1,44 @@
-mod application;
-mod domain;
-mod infrastructure;
-mod presentation;
+mod acl;
+mod config;
+mod geo;
+mod pubsub;
+mod rdb;
+mod replication;
+mod resp;
+mod server;
+mod session;
+mod store;
 
 use std::sync::Arc;
 
-use application::ports::{AclPort, PubSubPort, StorePort};
-use infrastructure::config::Config;
-use infrastructure::persistence::in_memory_store::InMemoryStore;
-use infrastructure::persistence::rdb;
-use infrastructure::replication::ReplicationState;
-use infrastructure::services::acl_service::AclService;
-use infrastructure::services::pubsub_service::PubSubService;
-use presentation::connection_handler::handle_connection;
+use acl::Acl;
+use config::Config;
+use pubsub::PubSub;
+use replication::ReplicationState;
+use store::Store;
 
 #[tokio::main]
 async fn main() {
     let config = Arc::new(Config::from_args());
-
-    let store: Arc<dyn StorePort> = Arc::new(InMemoryStore::new());
-    let pubsub: Arc<dyn PubSubPort> = Arc::new(PubSubService::new());
-    let acl: Arc<dyn AclPort> = Arc::new(AclService::new());
+    let store = Arc::new(Store::new());
+    let pubsub = Arc::new(PubSub::new());
+    let acl = Arc::new(Acl::new());
 
     if let Some(path) = config.rdb_path() {
         rdb::load(&path, &store);
     }
 
     let repl = if let Some((host, port)) = config.replicaof.clone() {
-        let r = ReplicationState::slave();
-        let s = Arc::clone(&store);
-        let rl = Arc::clone(&r);
-        let cfg = Arc::clone(&config);
+        let repl = Arc::new(ReplicationState::new_slave());
+        let store_clone = Arc::clone(&store);
+        let repl_clone = Arc::clone(&repl);
+        let my_port = config.port;
         tokio::spawn(async move {
-            presentation::replica_client::run(host, port, cfg.port, s, rl).await;
+            replication::run_replica_client(host, port, my_port, store_clone, repl_clone).await;
         });
-        r
+        repl
     } else {
-        ReplicationState::master()
+        Arc::new(ReplicationState::new_master())
     };
 
     let addr = format!("127.0.0.1:{}", config.port);
@@ -52,12 +54,12 @@ async fn main() {
                 let config = Arc::clone(&config);
                 let repl = Arc::clone(&repl);
                 tokio::spawn(async move {
-                    if let Err(e) = handle_connection(stream, store, pubsub, acl, config, repl).await {
-                        eprintln!("Connection error: {e}");
+                    if let Err(error) = server::handle_connection(stream, store, pubsub, acl, config, repl).await {
+                        eprintln!("Connection error: {error}");
                     }
                 });
             }
-            Err(e) => eprintln!("Accept error: {e}"),
+            Err(error) => eprintln!("Accept error: {error}"),
         }
     }
 }

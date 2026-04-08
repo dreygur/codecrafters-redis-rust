@@ -1,9 +1,9 @@
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::application::ports::StorePort;
+use crate::store::Store;
 
-pub fn load(path: &str, store: &Arc<dyn StorePort>) {
+pub fn load(path: &str, store: &Arc<Store>) {
     let data = match std::fs::read(path) {
         Ok(d) => d,
         Err(_) => return,
@@ -83,11 +83,15 @@ fn read_length(data: &[u8], pos: usize) -> (u64, usize) {
     match b >> 6 {
         0 => ((b & 0x3F) as u64, pos + 1),
         1 => {
-            if pos + 1 >= data.len() { return (0, pos + 1); }
+            if pos + 1 >= data.len() {
+                return (0, pos + 1);
+            }
             (((b & 0x3F) as u64) << 8 | data[pos + 1] as u64, pos + 2)
         }
         2 => {
-            if pos + 5 > data.len() { return (0, pos + 1); }
+            if pos + 5 > data.len() {
+                return (0, pos + 1);
+            }
             let n = u32::from_be_bytes(data[pos + 1..pos + 5].try_into().unwrap()) as u64;
             (n, pos + 5)
         }
@@ -114,16 +118,22 @@ fn read_string(data: &[u8], pos: usize) -> (String, usize) {
 fn read_int_encoded(data: &[u8], pos: usize) -> (String, usize) {
     match data[pos] & 0x3F {
         0 => {
-            if pos + 1 >= data.len() { return (String::new(), pos + 1); }
+            if pos + 1 >= data.len() {
+                return (String::new(), pos + 1);
+            }
             ((data[pos + 1] as i8).to_string(), pos + 2)
         }
         1 => {
-            if pos + 2 >= data.len() { return (String::new(), pos + 1); }
+            if pos + 2 >= data.len() {
+                return (String::new(), pos + 1);
+            }
             let n = i16::from_le_bytes([data[pos + 1], data[pos + 2]]);
             (n.to_string(), pos + 3)
         }
         2 => {
-            if pos + 4 >= data.len() { return (String::new(), pos + 1); }
+            if pos + 4 >= data.len() {
+                return (String::new(), pos + 1);
+            }
             let n = i32::from_le_bytes(data[pos + 1..pos + 5].try_into().unwrap());
             (n.to_string(), pos + 5)
         }
