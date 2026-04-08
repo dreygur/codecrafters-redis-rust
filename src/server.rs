@@ -141,10 +141,17 @@ fn dispatch(
             _ => resp::error("unknown ACL subcommand"),
         },
 
-        "PING" => match args.get(1) {
-            Some(msg) => resp::bulk_string(msg),
-            None => resp::simple_string("PONG"),
-        },
+        "PING" => {
+            if session.is_subscribed() {
+                let msg = args.get(1).map(|s| s.as_str()).unwrap_or("");
+                resp::array(vec![resp::bulk_string("pong"), resp::bulk_string(msg)])
+            } else {
+                match args.get(1) {
+                    Some(msg) => resp::bulk_string(msg),
+                    None => resp::simple_string("PONG"),
+                }
+            }
+        }
 
         "ECHO" => match args.get(1) {
             Some(msg) => resp::bulk_string(msg),
