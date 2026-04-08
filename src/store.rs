@@ -127,6 +127,9 @@ impl ListsState {
                 break;
             }
             let sender = self.waiters.get_mut(key).unwrap().pop_front().unwrap();
+            if sender.is_closed() {
+                continue;
+            }
             let value = self.data.get_mut(key).unwrap().remove(0);
             if sender.send(value).is_err() {
                 continue;
