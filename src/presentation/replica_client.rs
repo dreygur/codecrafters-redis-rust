@@ -62,7 +62,6 @@ async fn handshake_and_receive(
         loop {
             match try_parse_command(&carry) {
                 Some((args, consumed)) => {
-                    offset += consumed as u64;
                     carry.drain(..consumed);
 
                     if args[0].eq_ignore_ascii_case("REPLCONF")
@@ -72,8 +71,10 @@ async fn handshake_and_receive(
                             "*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n${}\r\n{}\r\n",
                             offset.to_string().len(), offset
                         );
+                        offset += consumed as u64;
                         writer.write_all(ack.as_bytes()).await?;
                     } else {
+                        offset += consumed as u64;
                         apply_command(&args, &store);
                     }
                 }
