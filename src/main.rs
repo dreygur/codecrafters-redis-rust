@@ -103,6 +103,44 @@ async fn handle_connection(
                     continue;
                 }
 
+                if cmd == "BLPOP" {
+                    if args.len() < 3 {
+                        writer.write_all(&RespEncoder::error("wrong number of arguments for 'blpop' command")).await?;
+                        continue;
+                    }
+                    // args: BLPOP key [key ...] timeout  — support single key for now
+                    let key = args[1].clone();
+                    match router.blpop_or_wait(&key) {
+                        Ok(val) => {
+                            let response = RespEncoder::array(vec![
+                                RespEncoder::bulk_string(&key),
+                                RespEncoder::bulk_string(&val),
+                            ]);
+                            writer.write_all(&response).await?;
+                        }
+                        Err(blpop_rx) => {
+                            tokio::select! {
+                                result = blpop_rx => {
+                                    match result {
+                                        Ok(val) => {
+                                            let response = RespEncoder::array(vec![
+                                                RespEncoder::bulk_string(&key),
+                                                RespEncoder::bulk_string(&val),
+                                            ]);
+                                            writer.write_all(&response).await?;
+                                        }
+                                        Err(_) => {}
+                                    }
+                                }
+                                Some(msg) = rx.recv() => {
+                                    writer.write_all(&msg).await?;
+                                }
+                            }
+                        }
+                    }
+                    continue;
+                }
+
                 let response = match cmd.as_str() {
                     "AUTH" => {
                         let (username, password) = match args.len() {

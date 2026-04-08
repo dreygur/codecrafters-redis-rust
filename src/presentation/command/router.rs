@@ -52,6 +52,10 @@ impl CommandRouter {
         self.store.key_version(key)
     }
 
+    pub fn blpop_or_wait(&self, key: &str) -> Result<String, tokio::sync::oneshot::Receiver<String>> {
+        self.store.blpop_or_wait(key)
+    }
+
     pub fn subscribe(&self, channel: &str, tx: UnboundedSender<Bytes>) {
         self.pubsub.subscribe(channel, tx);
     }

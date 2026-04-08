@@ -434,6 +434,18 @@ impl StorePort for InMemoryStore {
     fn key_version(&self, key: &str) -> u64 {
         *self.key_versions.lock().unwrap().get(key).unwrap_or(&0)
     }
+
+    fn blpop_or_wait(&self, key: &str) -> Result<String, tokio::sync::oneshot::Receiver<String>> {
+        let mut state = self.lists.lock().unwrap();
+        if let Some(list) = state.data.get_mut(key) {
+            if !list.is_empty() {
+                return Ok(list.remove(0));
+            }
+        }
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        state.waiters.entry(key.to_string()).or_default().push_back(tx);
+        Err(rx)
+    }
 }
 
 impl Clone for InMemoryStore {
