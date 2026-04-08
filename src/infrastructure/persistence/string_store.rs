@@ -43,6 +43,40 @@ impl StringStore {
     pub(super) fn contains(&self, key: &str) -> bool {
         self.data.lock().unwrap().contains_key(key)
     }
+
+    pub(super) fn keys(&self, pattern: &str) -> Vec<String> {
+        let mut map = self.data.lock().unwrap();
+        map.retain(|_, e| !e.is_expired());
+        if pattern == "*" {
+            return map.keys().cloned().collect();
+        }
+        map.keys()
+            .filter(|k| glob_match(pattern, k))
+            .cloned()
+            .collect()
+    }
+}
+
+fn glob_match(pattern: &str, s: &str) -> bool {
+    let p: Vec<char> = pattern.chars().collect();
+    let t: Vec<char> = s.chars().collect();
+    let mut dp = vec![vec![false; t.len() + 1]; p.len() + 1];
+    dp[0][0] = true;
+    for i in 1..=p.len() {
+        if p[i - 1] == '*' { dp[i][0] = dp[i - 1][0]; }
+    }
+    for i in 1..=p.len() {
+        for j in 1..=t.len() {
+            dp[i][j] = if p[i - 1] == '*' {
+                dp[i - 1][j] || dp[i][j - 1]
+            } else if p[i - 1] == '?' || p[i - 1] == t[j - 1] {
+                dp[i - 1][j - 1]
+            } else {
+                false
+            };
+        }
+    }
+    dp[p.len()][t.len()]
 }
 
 impl Clone for StringStore {

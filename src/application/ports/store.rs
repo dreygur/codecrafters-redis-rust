@@ -1,6 +1,7 @@
 use crate::domain::{DomainError, XAddError};
 
 pub trait StorePort: Send + Sync {
+    fn keys(&self, pattern: &str) -> Vec<String>;
     fn get(&self, key: &str) -> Option<String>;
     fn set(&self, key: String, value: String, ttl_millis: Option<u64>);
     fn incr(&self, key: &str) -> Result<i64, DomainError>;

@@ -99,6 +99,11 @@ impl CommandRouter {
             return RespEncoder::error("empty command");
         }
         match args[0].to_uppercase().as_str() {
+            "KEYS" => {
+                let pattern = args.get(1).map(|s| s.as_str()).unwrap_or("*");
+                let keys = self.store.keys(pattern);
+                RespEncoder::array(keys.iter().map(|k| RespEncoder::bulk_string(k)).collect())
+            }
             "PING" => match args.get(1) {
                 Some(msg) => RespEncoder::bulk_string(msg),
                 None => RespEncoder::simple_string("PONG"),

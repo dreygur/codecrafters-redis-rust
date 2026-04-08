@@ -35,6 +35,10 @@ impl InMemoryStore {
 }
 
 impl StorePort for InMemoryStore {
+    fn keys(&self, pattern: &str) -> Vec<String> {
+        self.strings.keys(pattern)
+    }
+
     fn get(&self, key: &str) -> Option<String> {
         self.strings.get(key)
     }
