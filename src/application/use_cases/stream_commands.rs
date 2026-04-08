@@ -1,9 +1,10 @@
 use std::sync::Arc;
 
+use bytes::Bytes;
+
 use crate::application::ports::StorePort;
 use crate::domain::DomainError;
 use crate::infrastructure::networking::resp::RespEncoder;
-use bytes::Bytes;
 
 pub struct StreamCommands {
     store: Arc<dyn StorePort>,
@@ -35,57 +36,70 @@ impl StreamCommands {
         }
         let count = args.get(5).and_then(|c| c.parse().ok());
         let entries = self.store.xrange(&args[1], &args[2], &args[3], count);
-        let response = entries
-            .into_iter()
-            .map(|(id, fields)| {
-                let mut arr = vec![RespEncoder::bulk_string(&id)];
-                for (k, v) in fields {
-                    arr.push(RespEncoder::bulk_string(&k));
-                    arr.push(RespEncoder::bulk_string(&v));
-                }
-                RespEncoder::array(arr)
-            })
-            .collect();
-        RespEncoder::array(response)
+        encode_entries_array(entries)
     }
 
     pub fn xread(&self, args: &[String]) -> Bytes {
-        if args.len() < 5 || args[1].to_uppercase() != "STREAMS" {
+        let Some((count, keys, ids)) = parse_xread_args(args) else {
             return RespEncoder::error(&DomainError::WrongArgCount.to_string());
-        }
-        let mut i = 2;
-        let mut keys = vec![];
-        let mut ids = vec![];
-        while i < args.len() - 1 {
-            keys.push(args[i].clone());
-            ids.push(args[i + 1].clone());
-            i += 2;
-        }
+        };
         let results = self.store.xread(&keys, &ids);
-        let response: Vec<Bytes> = results
-            .into_iter()
-            .map(|(key, entries)| {
-                let entries_arr: Vec<Bytes> = entries
-                    .into_iter()
-                    .map(|(id, fields)| {
-                        let mut arr = vec![RespEncoder::bulk_string(&id)];
-                        for (k, v) in fields {
-                            arr.push(RespEncoder::bulk_string(&k));
-                            arr.push(RespEncoder::bulk_string(&v));
-                        }
-                        RespEncoder::array(arr)
-                    })
-                    .collect();
-                RespEncoder::array(vec![
-                    RespEncoder::bulk_string(&key),
-                    RespEncoder::array(entries_arr),
-                ])
-            })
-            .collect();
-        if response.is_empty() {
-            RespEncoder::null_array()
-        } else {
-            RespEncoder::array(response)
+        if results.is_empty() {
+            return RespEncoder::null_array();
+        }
+        encode_xread_results(results, count)
+    }
+}
+
+pub fn encode_xread_results(
+    results: Vec<(String, Vec<(String, Vec<(String, String)>)>)>,
+    count: Option<usize>,
+) -> Bytes {
+    let streams: Vec<Bytes> = results.into_iter().map(|(key, entries)| {
+        let limit = count.unwrap_or(usize::MAX);
+        let entries_encoded = encode_entries_array(entries.into_iter().take(limit).collect());
+        RespEncoder::array(vec![
+            RespEncoder::bulk_string(&key),
+            entries_encoded,
+        ])
+    }).collect();
+    RespEncoder::array(streams)
+}
+
+fn encode_entries_array(entries: Vec<(String, Vec<(String, String)>)>) -> Bytes {
+    let encoded: Vec<Bytes> = entries.into_iter().map(|(id, fields)| {
+        let mut arr = vec![RespEncoder::bulk_string(&id)];
+        for (k, v) in fields {
+            arr.push(RespEncoder::bulk_string(&k));
+            arr.push(RespEncoder::bulk_string(&v));
+        }
+        RespEncoder::array(arr)
+    }).collect();
+    RespEncoder::array(encoded)
+}
+
+fn parse_xread_args(args: &[String]) -> Option<(Option<usize>, Vec<String>, Vec<String>)> {
+    let mut count = None;
+    let mut i = 1;
+
+    while i < args.len() {
+        match args[i].to_uppercase().as_str() {
+            "COUNT" => {
+                count = args.get(i + 1)?.parse().ok();
+                i += 2;
+            }
+            "STREAMS" => {
+                i += 1;
+                break;
+            }
+            _ => return None,
         }
     }
+
+    let remaining = &args[i..];
+    if remaining.len() < 2 || remaining.len() % 2 != 0 {
+        return None;
+    }
+    let mid = remaining.len() / 2;
+    Some((count, remaining[..mid].to_vec(), remaining[mid..].to_vec()))
 }

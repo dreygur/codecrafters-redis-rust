@@ -1,4 +1,3 @@
-use crate::domain::entities::SortedSet;
 use crate::domain::{DomainError, XAddError};
 
 pub trait StorePort: Send + Sync {
@@ -43,8 +42,16 @@ pub trait StorePort: Send + Sync {
     ) -> Vec<(String, Vec<(String, Vec<(String, String)>)>)>;
 
     fn key_version(&self, key: &str) -> u64;
-
-    /// Pops the first element from the list if available, otherwise registers a waiter.
-    /// Returns Ok(value) immediately or Err(receiver) to await on.
     fn blpop_or_wait(&self, key: &str) -> Result<String, tokio::sync::oneshot::Receiver<String>>;
+
+    fn stream_last_id(&self, key: &str) -> (u64, u64);
+
+    // Atomically checks for entries after `after_id`. If found, returns them.
+    // If not, registers `tx` as a waiter and returns None.
+    fn xread_blocking(
+        &self,
+        key: &str,
+        after_id: (u64, u64),
+        tx: tokio::sync::mpsc::UnboundedSender<(String, String, Vec<(String, String)>)>,
+    ) -> Option<Vec<(String, Vec<(String, String)>)>>;
 }

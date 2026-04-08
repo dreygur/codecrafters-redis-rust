@@ -8,6 +8,7 @@ use crate::application::ports::{AclPort, PubSubPort, StorePort};
 use crate::domain::entities::Session;
 use crate::infrastructure::networking::resp::RespEncoder;
 use crate::presentation::command::router::CommandRouter;
+use super::blocking_commands::{handle_blpop, handle_xread_block};
 use super::command_handlers::{
     handle_auth, handle_exec, handle_subscribe, handle_unsubscribe, handle_watch,
 };
@@ -63,6 +64,11 @@ pub async fn handle_connection(
                     continue;
                 }
 
+                if cmd == "XREAD" && args.iter().any(|a| a.eq_ignore_ascii_case("BLOCK")) {
+                    handle_xread_block(&args, &router, &mut writer).await?;
+                    continue;
+                }
+
                 let response = handle_command(&cmd, &args, &mut session, &router, &tx);
                 writer.write_all(&response).await?;
             }
@@ -77,48 +83,6 @@ pub async fn handle_connection(
 
 fn is_pubsub_command(cmd: &str) -> bool {
     matches!(cmd, "SUBSCRIBE" | "UNSUBSCRIBE" | "PSUBSCRIBE" | "PUNSUBSCRIBE" | "PING" | "QUIT" | "RESET")
-}
-
-async fn handle_blpop(
-    args: &[String],
-    router: &CommandRouter,
-    writer: &mut tokio::net::tcp::OwnedWriteHalf,
-) -> anyhow::Result<()> {
-    if args.len() < 3 {
-        writer.write_all(&RespEncoder::error("wrong number of arguments for 'blpop' command")).await?;
-        return Ok(());
-    }
-
-    let key = &args[1];
-    let timeout_secs: f64 = args.last().and_then(|s| s.parse().ok()).unwrap_or(0.0);
-
-    match router.blpop_or_wait(key) {
-        Ok(value) => {
-            writer.write_all(&build_blpop_response(key, &value)).await?;
-        }
-        Err(receiver) => {
-            let result = if timeout_secs == 0.0 {
-                receiver.await.ok()
-            } else {
-                let duration = std::time::Duration::from_secs_f64(timeout_secs);
-                tokio::time::timeout(duration, receiver).await.ok().and_then(|r| r.ok())
-            };
-
-            match result {
-                Some(value) => writer.write_all(&build_blpop_response(key, &value)).await?,
-                None => writer.write_all(&RespEncoder::null_array()).await?,
-            }
-        }
-    }
-
-    Ok(())
-}
-
-fn build_blpop_response(key: &str, value: &str) -> Bytes {
-    RespEncoder::array(vec![
-        RespEncoder::bulk_string(key),
-        RespEncoder::bulk_string(value),
-    ])
 }
 
 fn handle_command(

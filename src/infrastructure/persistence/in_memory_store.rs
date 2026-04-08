@@ -1,13 +1,14 @@
 use std::{collections::HashMap, sync::{Arc, Mutex}};
 
-use crate::application::ports::StorePort;
-use crate::domain::DomainError;
+use tokio::sync::{mpsc::UnboundedSender, oneshot::Receiver};
+
+use crate::{application::ports::StorePort, domain::{DomainError, XAddError}};
 use super::{
-    string_store::StringStore,
-    list_store::ListStore,
-    zset_store::ZSetStore,
-    stream_store::StreamStore,
+    list_store::ListStore, stream_store::StreamStore,
+    string_store::StringStore, zset_store::ZSetStore,
 };
+
+type StreamNotification = (String, String, Vec<(String, String)>);
 
 pub struct InMemoryStore {
     strings: StringStore,
@@ -111,21 +112,10 @@ impl StorePort for InMemoryStore {
         count
     }
 
-    fn zrank(&self, key: &str, member: &str) -> Option<i64> {
-        self.zsets.zrank(key, member)
-    }
-
-    fn zrange(&self, key: &str, start: i64, stop: i64) -> Vec<String> {
-        self.zsets.zrange(key, start, stop)
-    }
-
-    fn zcard(&self, key: &str) -> i64 {
-        self.zsets.zcard(key)
-    }
-
-    fn zscore(&self, key: &str, member: &str) -> Option<f64> {
-        self.zsets.zscore(key, member)
-    }
+    fn zrank(&self, key: &str, member: &str) -> Option<i64> { self.zsets.zrank(key, member) }
+    fn zrange(&self, key: &str, start: i64, stop: i64) -> Vec<String> { self.zsets.zrange(key, start, stop) }
+    fn zcard(&self, key: &str) -> i64 { self.zsets.zcard(key) }
+    fn zscore(&self, key: &str, member: &str) -> Option<f64> { self.zsets.zscore(key, member) }
 
     fn zrem(&self, key: &str, members: &[String]) -> i64 {
         let removed = self.zsets.zrem(key, members);
@@ -141,48 +131,38 @@ impl StorePort for InMemoryStore {
         is_new
     }
 
-    fn geopos(&self, key: &str, member: &str) -> Option<(f64, f64)> {
-        self.zsets.geopos(key, member)
-    }
-
-    fn geodist(&self, key: &str, m1: &str, m2: &str) -> Option<f64> {
-        self.zsets.geodist(key, m1, m2)
-    }
+    fn geopos(&self, key: &str, member: &str) -> Option<(f64, f64)> { self.zsets.geopos(key, member) }
+    fn geodist(&self, key: &str, m1: &str, m2: &str) -> Option<f64> { self.zsets.geodist(key, m1, m2) }
 
     fn geosearch_radius(&self, key: &str, lon: f64, lat: f64, radius_m: f64) -> Vec<(String, f64)> {
         self.zsets.geosearch_radius(key, lon, lat, radius_m)
     }
 
-    fn xadd(&self, key: &str, id: &str, fields: Vec<(String, String)>) -> Result<String, crate::domain::XAddError> {
+    fn xadd(&self, key: &str, id: &str, fields: Vec<(String, String)>) -> Result<String, XAddError> {
         let entry_id = self.streams.xadd(key, id, fields)?;
         self.bump_version(key);
         Ok(entry_id)
     }
 
-    fn xrange(
-        &self,
-        key: &str,
-        start: &str,
-        end: &str,
-        count: Option<usize>,
-    ) -> Vec<(String, Vec<(String, String)>)> {
+    fn xrange(&self, key: &str, start: &str, end: &str, count: Option<usize>) -> Vec<(String, Vec<(String, String)>)> {
         self.streams.xrange(key, start, end, count)
     }
 
-    fn xread(
-        &self,
-        keys: &[String],
-        ids: &[String],
-    ) -> Vec<(String, Vec<(String, Vec<(String, String)>)>)> {
+    fn xread(&self, keys: &[String], ids: &[String]) -> Vec<(String, Vec<(String, Vec<(String, String)>)>)> {
         self.streams.xread(keys, ids)
     }
 
-    fn key_version(&self, key: &str) -> u64 {
-        *self.key_versions.lock().unwrap().get(key).unwrap_or(&0)
-    }
+    fn key_version(&self, key: &str) -> u64 { *self.key_versions.lock().unwrap().get(key).unwrap_or(&0) }
+    fn blpop_or_wait(&self, key: &str) -> Result<String, Receiver<String>> { self.lists.blpop_or_wait(key) }
+    fn stream_last_id(&self, key: &str) -> (u64, u64) { self.streams.last_entry_id(key) }
 
-    fn blpop_or_wait(&self, key: &str) -> Result<String, tokio::sync::oneshot::Receiver<String>> {
-        self.lists.blpop_or_wait(key)
+    fn xread_blocking(
+        &self,
+        key: &str,
+        after_id: (u64, u64),
+        tx: UnboundedSender<StreamNotification>,
+    ) -> Option<Vec<(String, Vec<(String, String)>)>> {
+        self.streams.xread_blocking(key, after_id, tx)
     }
 }
 

@@ -56,6 +56,27 @@ impl CommandRouter {
         self.store.blpop_or_wait(key)
     }
 
+    pub fn stream_last_id(&self, key: &str) -> (u64, u64) {
+        self.store.stream_last_id(key)
+    }
+
+    pub fn xread_non_blocking(
+        &self,
+        keys: &[String],
+        ids: &[String],
+    ) -> Vec<(String, Vec<(String, Vec<(String, String)>)>)> {
+        self.store.xread(keys, ids)
+    }
+
+    pub fn xread_blocking(
+        &self,
+        key: &str,
+        after_id: (u64, u64),
+        tx: tokio::sync::mpsc::UnboundedSender<(String, String, Vec<(String, String)>)>,
+    ) -> Option<Vec<(String, Vec<(String, String)>)>> {
+        self.store.xread_blocking(key, after_id, tx)
+    }
+
     pub fn subscribe(&self, channel: &str, tx: UnboundedSender<Bytes>) {
         self.pubsub.subscribe(channel, tx);
     }
