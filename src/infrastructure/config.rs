@@ -19,10 +19,26 @@ impl Config {
                     i += 2;
                 }
                 "--replicaof" => {
-                    if let (Some(host), Some(p)) = (args.get(i + 1), args.get(i + 2)) {
-                        cfg.replicaof = p.parse().ok().map(|p| (host.clone(), p));
+                    if let Some(next) = args.get(i + 1) {
+                        let parts: Vec<&str> = next.splitn(2, ' ').collect();
+                        if parts.len() == 2 {
+                            // "--replicaof" "host port" (single arg)
+                            if let Ok(p) = parts[1].parse::<u16>() {
+                                cfg.replicaof = Some((parts[0].to_string(), p));
+                            }
+                            i += 2;
+                        } else if let Some(port_str) = args.get(i + 2) {
+                            // "--replicaof" "host" "port" (two args)
+                            if let Ok(p) = port_str.parse::<u16>() {
+                                cfg.replicaof = Some((next.clone(), p));
+                            }
+                            i += 3;
+                        } else {
+                            i += 2;
+                        }
+                    } else {
+                        i += 1;
                     }
-                    i += 3;
                 }
                 "--dir" => {
                     cfg.dir = args.get(i + 1).cloned();
