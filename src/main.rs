@@ -108,8 +108,9 @@ async fn handle_connection(
                         writer.write_all(&RespEncoder::error("wrong number of arguments for 'blpop' command")).await?;
                         continue;
                     }
-                    // args: BLPOP key [key ...] timeout  — support single key for now
+                    // args: BLPOP key [key ...] timeout
                     let key = args[1].clone();
+                    let timeout_secs: f64 = args.last().and_then(|s| s.parse().ok()).unwrap_or(0.0);
                     match router.blpop_or_wait(&key) {
                         Ok(val) => {
                             let response = RespEncoder::array(vec![
@@ -119,21 +120,25 @@ async fn handle_connection(
                             writer.write_all(&response).await?;
                         }
                         Err(blpop_rx) => {
-                            tokio::select! {
-                                result = blpop_rx => {
-                                    match result {
-                                        Ok(val) => {
-                                            let response = RespEncoder::array(vec![
-                                                RespEncoder::bulk_string(&key),
-                                                RespEncoder::bulk_string(&val),
-                                            ]);
-                                            writer.write_all(&response).await?;
-                                        }
-                                        Err(_) => {}
-                                    }
+                            let val_opt: Option<String> = if timeout_secs == 0.0 {
+                                blpop_rx.await.ok()
+                            } else {
+                                let duration = std::time::Duration::from_secs_f64(timeout_secs);
+                                match tokio::time::timeout(duration, blpop_rx).await {
+                                    Ok(Ok(val)) => Some(val),
+                                    _ => None,
                                 }
-                                Some(msg) = rx.recv() => {
-                                    writer.write_all(&msg).await?;
+                            };
+                            match val_opt {
+                                Some(val) => {
+                                    let response = RespEncoder::array(vec![
+                                        RespEncoder::bulk_string(&key),
+                                        RespEncoder::bulk_string(&val),
+                                    ]);
+                                    writer.write_all(&response).await?;
+                                }
+                                None => {
+                                    writer.write_all(&RespEncoder::null_array()).await?;
                                 }
                             }
                         }
