@@ -1,5 +1,8 @@
 use std::sync::Arc;
 
+use bytes::Bytes;
+use tokio::sync::mpsc::UnboundedSender;
+
 use crate::application::ports::{AclPort, PubSubPort, StorePort};
 use crate::application::use_cases::{
     auth_commands::AuthCommands, geo_commands::GeoCommands, list_commands::ListCommands,
@@ -7,9 +10,8 @@ use crate::application::use_cases::{
     stream_commands::StreamCommands, string_commands::StringCommands,
     transaction_commands::TransactionCommands,
 };
+use crate::infrastructure::config::Config;
 use crate::infrastructure::networking::resp::RespEncoder;
-use bytes::Bytes;
-use tokio::sync::mpsc::UnboundedSender;
 
 pub struct CommandRouter {
     string_cmds: StringCommands,
@@ -22,6 +24,7 @@ pub struct CommandRouter {
     tx_cmds: TransactionCommands,
     store: Arc<dyn StorePort>,
     pubsub: Arc<dyn PubSubPort>,
+    config: Arc<Config>,
 }
 
 impl CommandRouter {
@@ -29,6 +32,7 @@ impl CommandRouter {
         store: Arc<dyn StorePort>,
         acl: Arc<dyn AclPort>,
         pubsub: Arc<dyn PubSubPort>,
+        config: Arc<Config>,
     ) -> Self {
         Self {
             string_cmds: StringCommands::new(Arc::clone(&store)),
@@ -41,6 +45,7 @@ impl CommandRouter {
             tx_cmds: TransactionCommands::new(Arc::clone(&store)),
             store,
             pubsub,
+            config,
         }
     }
 
@@ -130,6 +135,8 @@ impl CommandRouter {
 
             "PUBLISH" => self.pubsub_cmds.publish(args),
 
+            "CONFIG" => self.handle_config(args),
+
             "ACL" => match args.get(1).map(|s| s.to_uppercase()).as_deref() {
                 Some("GETUSER") => match args.get(2) {
                     Some(username) => self.auth_cmds.getuser(username),
@@ -140,6 +147,33 @@ impl CommandRouter {
             },
 
             _ => RespEncoder::error("unknown command"),
+        }
+    }
+
+    fn handle_config(&self, args: &[String]) -> Bytes {
+        let sub = args.get(1).map(|s| s.to_uppercase());
+        match sub.as_deref() {
+            Some("GET") => {
+                let param = match args.get(2) {
+                    Some(p) => p.to_lowercase(),
+                    None => return RespEncoder::error("wrong number of arguments"),
+                };
+                let mut pairs: Vec<Bytes> = vec![];
+                if param == "dir" || param == "*" {
+                    if let Some(dir) = &self.config.dir {
+                        pairs.push(RespEncoder::bulk_string("dir"));
+                        pairs.push(RespEncoder::bulk_string(dir));
+                    }
+                }
+                if param == "dbfilename" || param == "*" {
+                    if let Some(name) = &self.config.dbfilename {
+                        pairs.push(RespEncoder::bulk_string("dbfilename"));
+                        pairs.push(RespEncoder::bulk_string(name));
+                    }
+                }
+                RespEncoder::array(pairs)
+            }
+            _ => RespEncoder::error("unknown CONFIG subcommand"),
         }
     }
 }
