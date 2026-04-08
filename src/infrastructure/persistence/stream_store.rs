@@ -3,7 +3,7 @@ use std::{collections::HashMap, sync::{Arc, Mutex}};
 use tokio::sync::mpsc;
 
 use crate::domain::XAddError;
-use super::stream_id::{parse_entry_id, resolve_id, StreamEntry};
+use super::stream_id::{parse_entry_id, parse_range_end, parse_range_start, resolve_id, StreamEntry};
 
 type StreamNotification = (String, String, Vec<(String, String)>);
 
@@ -117,8 +117,8 @@ impl StreamStore {
         let inner = self.inner.lock().unwrap();
         let Some(stream) = inner.data.get(key) else { return vec![]; };
 
-        let start_id = if start == "-" { (0u64, 0u64) } else { parse_entry_id(start).unwrap_or((0, 0)) };
-        let end_id = if end == "+" { (u64::MAX, u64::MAX) } else { parse_entry_id(end).unwrap_or((u64::MAX, u64::MAX)) };
+        let start_id = if start == "-" { (0u64, 0u64) } else { parse_range_start(start) };
+        let end_id = if end == "+" { (u64::MAX, u64::MAX) } else { parse_range_end(end) };
 
         stream.iter()
             .filter(|(id, _)| {
