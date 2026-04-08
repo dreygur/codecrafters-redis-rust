@@ -19,6 +19,8 @@ pub(super) fn resolve_id(
             id.trim_end_matches("-*").parse().map_err(|_| XAddError::InvalidFormat)?
         };
         let seq = next_seq_for_ms(key, ms, data);
+        // 0-0 is never valid; when ms=0 and no prior entries, start at 0-1
+        let seq = if ms == 0 && seq == 0 { 1 } else { seq };
         return Ok((ms, seq));
     }
     parse_entry_id(id)
