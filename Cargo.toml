@@ -8,7 +8,7 @@
 [package]
 name = "redis-starter-rust"
 version = "0.1.0"
-authors = ["Codecrafters <hello@codecrafters.io>"]
+authors = ["Rakibul Yeasin <ryeasin03@gmail.com>"]
 edition = "2021"
 
 # DON'T EDIT THIS!
