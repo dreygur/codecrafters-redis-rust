@@ -68,12 +68,13 @@ pub fn encode_xread_results(
 
 fn encode_entries_array(entries: Vec<(String, Vec<(String, String)>)>) -> Bytes {
     let encoded: Vec<Bytes> = entries.into_iter().map(|(id, fields)| {
-        let mut arr = vec![RespEncoder::bulk_string(&id)];
-        for (k, v) in fields {
-            arr.push(RespEncoder::bulk_string(&k));
-            arr.push(RespEncoder::bulk_string(&v));
-        }
-        RespEncoder::array(arr)
+        let fields_arr: Vec<Bytes> = fields.into_iter()
+            .flat_map(|(k, v)| [RespEncoder::bulk_string(&k), RespEncoder::bulk_string(&v)])
+            .collect();
+        RespEncoder::array(vec![
+            RespEncoder::bulk_string(&id),
+            RespEncoder::array(fields_arr),
+        ])
     }).collect();
     RespEncoder::array(encoded)
 }
