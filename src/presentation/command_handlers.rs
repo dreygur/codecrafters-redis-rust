@@ -11,6 +11,7 @@ pub(super) fn handle_auth(args: &[String], session: &mut Session, router: &Comma
         3 => (args[1].as_str(), args[2].as_str()),
         _ => return RespEncoder::error("wrong number of arguments for 'auth' command"),
     };
+
     if router.authenticate(username, password) {
         session.authenticate(username.to_string());
         RespEncoder::simple_string("OK")
@@ -37,18 +38,24 @@ pub(super) fn handle_exec(session: &mut Session, router: &CommandRouter) -> Byte
         return RespEncoder::error("EXEC without MULTI");
     }
     let watched: Vec<(String, u64)> = session.watched_versions()
-        .iter().map(|(k, v)| (k.clone(), *v)).collect();
+        .iter()
+        .map(|(k, v)| (k.clone(), *v))
+        .collect();
     let queue = session.execute_tx();
     session.unwatch();
     router.exec_transaction(&watched, queue)
 }
 
 pub(super) fn handle_subscribe(
-    args: &[String], session: &mut Session,
-    router: &CommandRouter, tx: &mpsc::UnboundedSender<Bytes>,
+    args: &[String],
+    session: &mut Session,
+    router: &CommandRouter,
+    tx: &mpsc::UnboundedSender<Bytes>,
 ) -> Bytes {
     args.iter().skip(1).fold(BytesMut::new(), |mut out, channel| {
-        if !session.is_subscribed_to(channel) { router.subscribe(channel, tx.clone()); }
+        if !session.is_subscribed_to(channel) {
+            router.subscribe(channel, tx.clone());
+        }
         let count = session.subscribe(channel);
         out.extend_from_slice(&RespEncoder::array(vec![
             RespEncoder::bulk_string("subscribe"),
@@ -60,8 +67,10 @@ pub(super) fn handle_subscribe(
 }
 
 pub(super) fn handle_unsubscribe(
-    args: &[String], session: &mut Session,
-    router: &CommandRouter, tx: &mpsc::UnboundedSender<Bytes>,
+    args: &[String],
+    session: &mut Session,
+    router: &CommandRouter,
+    tx: &mpsc::UnboundedSender<Bytes>,
 ) -> Bytes {
     args.iter().skip(1).fold(BytesMut::new(), |mut out, channel| {
         router.unsubscribe(channel, tx);
